@@ -1,67 +1,73 @@
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { PlaybackStatus, PlaylistItem, TrackItem } from '../shared/models';
+import { PlaybackStatus, PlaylistItem, TrackItem, WaveSettings } from '../shared/models';
+
+export async function pickMusicFolder(): Promise<string | null> {
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    title: 'Выберите папку с музыкой',
+  });
+  return typeof selected === 'string' ? selected : null;
+}
 
 export const tauriApi = {
-  async getTracks(): Promise<TrackItem[]> {
-    return invoke<TrackItem[]>('get_tracks');
+  pickFolder: pickMusicFolder,
+  pickMusicFolder,
+  selectFolder: pickMusicFolder,
+
+  pickAndScanFolder: async (): Promise<TrackItem[] | null> => {
+    const folderPath = await pickMusicFolder();
+    if (!folderPath) return null;
+    return invoke<TrackItem[]>('scan_folder', { folderPath });
   },
 
-  async pickAndScanFolder(): Promise<TrackItem[] | null> {
-    const selected = await open({
-      directory: true,
-      multiple: false,
-      title: 'Выберите папку с музыкой',
-    });
+  getTracks: (): Promise<TrackItem[]> => invoke<TrackItem[]>('get_tracks'),
 
-    if (!selected || typeof selected !== 'string') {
-      return null;
-    }
+  scanFolder: (folderPath: string): Promise<TrackItem[]> =>
+    invoke<TrackItem[]>('scan_folder', { folderPath }),
 
-    return invoke<TrackItem[]>('scan_folder', { folderPath: selected });
+  playTrack: (trackId: string, audioUrl: string): Promise<void> =>
+    invoke('play_track', { trackId, audioUrl }),
+
+  pauseTrack: (): Promise<void> => invoke('pause_track'),
+
+  resumeTrack: (): Promise<void> => invoke('resume_track'),
+
+  seekTrack: (seconds: number): Promise<void> =>
+    invoke('seek_track', { seconds: Math.floor(seconds) }),
+
+  setVolume: (volume: number): Promise<void> => invoke('set_volume', { volume }),
+
+  toggleMute: (): Promise<boolean> => invoke<boolean>('toggle_mute'),
+
+  getPlaybackStatus: (): Promise<PlaybackStatus> =>
+    invoke<PlaybackStatus>('get_playback_status'),
+
+  toggleFavorite: (trackId: string): Promise<boolean> =>
+    invoke<boolean>('toggle_favorite', { trackId }),
+
+  getPlaylists: (): Promise<PlaylistItem[]> => invoke<PlaylistItem[]>('get_playlists'),
+
+  createPlaylist: (id: string, name: string): Promise<PlaylistItem> =>
+    invoke<PlaylistItem>('create_playlist', { id, name }),
+
+  addTrackToPlaylist: (playlistId: string, trackId: string): Promise<void> =>
+    invoke('add_track_to_playlist', { playlistId, trackId }),
+
+  setCustomApiUrl: (url: string): Promise<void> =>
+    invoke('set_custom_api_url', { url }),
+
+  searchOnlineTracks: async (query: string): Promise<TrackItem[]> => {
+    if (!query.trim()) return [];
+    return invoke<TrackItem[]>('search_online_tracks', { query });
   },
 
-  async playTrack(trackId: string, audioUrl: string): Promise<void> {
-    return invoke('play_track', { trackId, audioUrl });
-  },
-
-  async pauseTrack(): Promise<void> {
-    return invoke('pause_track');
-  },
-
-  async resumeTrack(): Promise<void> {
-    return invoke('resume_track');
-  },
-
-  async seekTrack(seconds: number): Promise<void> {
-    return invoke('seek_track', { seconds: Math.floor(seconds) });
-  },
-
-  async setVolume(volume: number): Promise<void> {
-    return invoke('set_volume', { volume });
-  },
-
-  async toggleMute(): Promise<boolean> {
-    return invoke<boolean>('toggle_mute');
-  },
-
-  async getPlaybackStatus(): Promise<PlaybackStatus> {
-    return invoke<PlaybackStatus>('get_playback_status');
-  },
-
-  async toggleFavorite(trackId: string): Promise<boolean> {
-    return invoke<boolean>('toggle_favorite', { trackId });
-  },
-
-  async getPlaylists(): Promise<PlaylistItem[]> {
-    return invoke<PlaylistItem[]>('get_playlists');
-  },
-
-  async createPlaylist(id: string, name: string): Promise<PlaylistItem> {
-    return invoke<PlaylistItem>('create_playlist', { id, name });
-  },
-
-  async addTrackToPlaylist(playlistId: string, trackId: string): Promise<void> {
-    return invoke('add_track_to_playlist', { playlistId, trackId });
-  },
+  getWaveTracks: (settings: WaveSettings): Promise<TrackItem[]> =>
+    invoke<TrackItem[]>('get_wave_tracks', {
+      mood: settings.mood,
+      activity: settings.activity,
+      character: settings.character,
+      genre: settings.genre,
+    }),
 };

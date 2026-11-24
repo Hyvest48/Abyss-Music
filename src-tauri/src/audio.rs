@@ -1,10 +1,13 @@
 ﻿use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Cursor, Read, Seek};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::Duration;
 use rodio::{Decoder, OutputStream, Sink};
 use crate::models::PlaybackStatus;
+
+trait ReadSeek: Read + Seek + Send + Sync {}
+impl<T: Read + Seek + Send + Sync> ReadSeek for T {}
 
 enum AudioCommand {
     Play(String, Sender<Result<(), String>>),
@@ -44,14 +47,32 @@ impl AudioPlayer {
 
             while let Ok(cmd) = cmd_rx.recv() {
                 match cmd {
-                    AudioCommand::Play(path, reply) => {
+                    AudioCommand::Play(source_path, reply) => {
                         if let Some(old_sink) = sink.take() {
                             old_sink.stop();
                         }
                         let res = (|| -> Result<(), String> {
-                            let file = File::open(&path)
-                                .map_err(|e| format!("Не удалось открыть файл: {}", e))?;
-                            let source = Decoder::new(BufReader::new(file))
+                            let reader: Box<dyn ReadSeek> = if source_path.starts_with("http://")
+                                || source_path.starts_with("https://")
+                            {
+                                let client = reqwest::blocking::Client::builder()
+                                    .timeout(Duration::from_secs(20))
+                                    .build()
+                                    .map_err(|e| format!("Ошибка HTTP-клиента: {}", e))?;
+                                let bytes = client
+                                    .get(&source_path)
+                                    .send()
+                                    .map_err(|e| format!("Ошибка загрузки потока: {}", e))?
+                                    .bytes()
+                                    .map_err(|e| format!("Ошибка чтения аудиопотока: {}", e))?;
+                                Box::new(Cursor::new(bytes.to_vec()))
+                            } else {
+                                let file = File::open(&source_path)
+                                    .map_err(|e| format!("Не удалось открыть файл: {}", e))?;
+                                Box::new(BufReader::new(file))
+                            };
+
+                            let source = Decoder::new(reader)
                                 .map_err(|e| format!("Ошибка декодирования аудио: {}", e))?;
                             let new_sink = Sink::try_new(&stream_handle)
                                 .map_err(|e| e.to_string())?;

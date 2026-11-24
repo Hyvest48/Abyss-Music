@@ -1,6 +1,7 @@
 mod audio;
 mod db;
 mod models;
+mod providers;
 mod scanner;
 
 use std::sync::Mutex;
@@ -12,6 +13,7 @@ use models::{PlaybackStatus, PlaylistItem, TrackItem};
 pub struct AppState {
     pub db: Mutex<Connection>,
     pub player: Mutex<AudioPlayer>,
+    pub custom_api_url: Mutex<String>,
 }
 
 #[tauri::command]
@@ -29,12 +31,67 @@ fn scan_folder(folder_path: String, state: State<AppState>) -> Result<Vec<TrackI
 }
 
 #[tauri::command]
+fn set_custom_api_url(url: String, state: State<AppState>) -> Result<(), String> {
+    let mut api_url = state.custom_api_url.lock().map_err(|e| e.to_string())?;
+    *api_url = url.trim().to_string();
+    Ok(())
+}
+
+#[tauri::command]
+fn search_online_tracks(query: String, state: State<AppState>) -> Result<Vec<TrackItem>, String> {
+    let custom_url = state.custom_api_url.lock().map_err(|e| e.to_string())?.clone();
+    let mut results = Vec::new();
+
+    // 1. Сначала запрашиваем ваш с Арсением API (если сервер недоступен — не ломаем поиск)
+    if let Ok(custom_tracks) = providers::search_custom_api(&custom_url, &query) {
+        results.extend(custom_tracks);
+    }
+
+    // 2. Подмешиваем треки из Audius
+    if let Ok(audius_tracks) = providers::search_audius(&query) {
+        results.extend(audius_tracks);
+    }
+
+    Ok(results)
+}
+
+#[tauri::command]
+fn get_wave_tracks(
+    mood: Option<String>,
+    activity: Option<String>,
+    character: Option<String>,
+    genre: Option<String>,
+    state: State<AppState>,
+) -> Result<Vec<TrackItem>, String> {
+    let custom_url = state.custom_api_url.lock().map_err(|e| e.to_string())?.clone();
+    let mut results = Vec::new();
+
+    if let Ok(custom_tracks) = providers::wave_custom_api(
+        &custom_url,
+        mood.as_deref(),
+        activity.as_deref(),
+        character.as_deref(),
+        genre.as_deref(),
+    ) {
+        results.extend(custom_tracks);
+    }
+
+    if let Ok(audius_tracks) =
+        providers::wave_audius(mood.as_deref(), activity.as_deref(), genre.as_deref())
+    {
+        results.extend(audius_tracks);
+    }
+
+    Ok(results)
+}
+
+#[tauri::command]
 fn play_track(track_id: String, audio_url: String, state: State<AppState>) -> Result<(), String> {
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let _ = db::record_play(&conn, &track_id);
     }
-    let mut player = state.player.lock().map_err(|e| e.to_string())?;
+    let player = state.player.lock().map_err(|e| e.to_string())?;
     player.play_file(&audio_url)
 }
 
@@ -60,14 +117,14 @@ fn seek_track(seconds: u64, state: State<AppState>) -> Result<(), String> {
 
 #[tauri::command]
 fn set_volume(volume: f32, state: State<AppState>) -> Result<(), String> {
-    let mut player = state.player.lock().map_err(|e| e.to_string())?;
+    let player = state.player.lock().map_err(|e| e.to_string())?;
     player.set_volume(volume);
     Ok(())
 }
 
 #[tauri::command]
 fn toggle_mute(state: State<AppState>) -> Result<bool, String> {
-    let mut player = state.player.lock().map_err(|e| e.to_string())?;
+    let player = state.player.lock().map_err(|e| e.to_string())?;
     Ok(player.toggle_mute())
 }
 
@@ -116,12 +173,16 @@ pub fn run() {
             app.manage(AppState {
                 db: Mutex::new(conn),
                 player: Mutex::new(audio_player),
+                custom_api_url: Mutex::new("http://localhost:8000".to_string()),
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_tracks,
             scan_folder,
+            set_custom_api_url,
+            search_online_tracks,
+            get_wave_tracks,
             play_track,
             pause_track,
             resume_track,
