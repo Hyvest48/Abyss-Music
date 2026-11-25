@@ -70,7 +70,7 @@ export const App: React.FC = () => {
     initData();
   }, []);
 
-  // Живой поиск по Audius + вашему с Арсением API (задержка 400 мс)
+  // Живой поиск по Audius + Abyss API (задержка 400 мс)
   useEffect(() => {
     if (activeTab !== 'search') return;
     const trimmed = searchQuery.trim();
@@ -348,9 +348,19 @@ export const App: React.FC = () => {
 
   const activePlaylist = playlists.find((p) => p.id === activePlaylistId) || null;
   const activeQueue = queue.length > 0 ? queue : displayedTracks;
+  const viewKey = `${activeTab}-${activePlaylistId ?? 'root'}`;
 
   return (
     <div className="app-shell">
+      {/* Динамическая подсветка фона под обложку текущего трека */}
+      {currentTrack?.coverUrl && (
+        <div
+          className="ambient-cover-glow"
+          style={{ backgroundImage: `url(${currentTrack.coverUrl})` }}
+          aria-hidden="true"
+        />
+      )}
+
       <Sidebar
         activeTab={activeTab}
         activePlaylistId={activePlaylistId}
@@ -370,125 +380,175 @@ export const App: React.FC = () => {
       />
 
       <main className="main-workspace">
-        {activeTab === 'home' && (
-          <>
-            <section className="wave-hero">
-              <svg className="wave-hero-bg-lines" viewBox="0 0 340 240" fill="none">
-                <path
-                  d="M-20 190 C 80 110, 170 250, 360 120"
-                  stroke="rgba(255,255,255,0.06)"
-                  strokeWidth="1.5"
-                />
-                <path
-                  d="M-20 140 C 110 60, 210 210, 360 70"
-                  stroke="rgba(255,255,255,0.04)"
-                  strokeWidth="1.5"
-                />
-              </svg>
+        <div key={viewKey} className="view-transition">
+          {activeTab === 'home' && (
+            <>
+              <section className="wave-hero">
+                <svg className="wave-hero-bg-lines" viewBox="0 0 340 240" fill="none">
+                  <path
+                    d="M-20 190 C 80 110, 170 250, 360 120"
+                    stroke="rgba(255,255,255,0.08)"
+                    strokeWidth="1.5"
+                  />
+                  <path
+                    d="M-20 140 C 110 60, 210 210, 360 70"
+                    stroke="rgba(255,255,255,0.05)"
+                    strokeWidth="1.5"
+                  />
+                </svg>
 
-              <div>
-                <h1 className="wave-hero-title">Моя волна</h1>
-                <p className="wave-hero-subtitle">
-                  Бесконечный персональный поток под твоё настроение
-                  {activeWaveTags.map((tag) => (
-                    <span key={tag} className="wave-active-tag">
-                      {tag}
-                    </span>
-                  ))}
-                </p>
-              </div>
-
-              <div className="wave-controls">
-                <button
-                  className="wave-play-btn"
-                  onClick={() => handleStartWave()}
-                  disabled={isLoadingStream}
-                  title="Запустить Мою волну"
-                >
-                  {playbackStatus.isPlaying && onlineTracks.length > 0 ? (
-                    <Pause size={22} fill="currentColor" />
-                  ) : (
-                    <Play size={22} fill="currentColor" style={{ marginLeft: 2 }} />
+                <div className="wave-hero-content">
+                  <h1 className="wave-hero-title">Моя волна</h1>
+                  <p className="wave-hero-subtitle">
+                    Бесконечный персональный поток под твоё настроение
+                  </p>
+                  {activeWaveTags.length > 0 && (
+                    <div className="wave-tags-row">
+                      {activeWaveTags.map((tag) => (
+                        <span key={tag} className="wave-active-tag">
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
                   )}
-                </button>
-                <button
-                  className="wave-settings-btn"
-                  onClick={() => setIsWaveModalOpen(true)}
-                >
-                  <SlidersHorizontal size={16} />
-                  <span>Настроить волну</span>
-                </button>
-              </div>
-            </section>
-
-            {isLoadingStream && (
-              <div style={{ marginTop: 28 }} className="empty-box">
-                <Music size={34} />
-                <div className="track-name" style={{ fontSize: 16 }}>
-                  Подбираем треки в поток...
                 </div>
-                <p className="track-artist" style={{ maxWidth: 380 }}>
-                  Загружаем музыку из Audius и Abyss Cloud
-                </p>
-              </div>
-            )}
 
-            {!isLoadingStream && displayedTracks.length === 0 && (
-              <div style={{ marginTop: 28 }} className="empty-box">
-                <FolderPlus size={36} />
-                <div className="track-name" style={{ fontSize: 16 }}>
-                  Медиатека пока пуста
+                <div className="wave-controls">
+                  <button
+                    className={`wave-play-btn ${isLoadingStream ? 'is-loading' : ''}`}
+                    onClick={() => handleStartWave()}
+                    disabled={isLoadingStream}
+                    title="Запустить Мою волну"
+                  >
+                    {playbackStatus.isPlaying && onlineTracks.length > 0 ? (
+                      <Pause size={22} fill="currentColor" />
+                    ) : (
+                      <Play size={22} fill="currentColor" style={{ marginLeft: 2 }} />
+                    )}
+                  </button>
+                  <button
+                    className="wave-settings-btn"
+                    onClick={() => setIsWaveModalOpen(true)}
+                  >
+                    <SlidersHorizontal size={16} />
+                    <span>Настроить волну</span>
+                  </button>
                 </div>
-                <p className="track-artist" style={{ maxWidth: 380 }}>
-                  Выбери папку с музыкой на компьютере — Rust-сканер прочитает теги и сохранит треки в локальную базу SQLite, или нажми Play в «Моей волне».
-                </p>
-                <button className="btn-primary-pill" onClick={handlePickAndScanFolder}>
-                  Выбрать папку с музыкой
-                </button>
-              </div>
-            )}
+              </section>
 
-            {!isLoadingStream && displayedTracks.length > 0 && (
-              <>
-                <div className="section-header-row" style={{ marginTop: 28 }}>
-                  <h2 className="section-heading">Недавно добавлено</h2>
+              {isLoadingStream && (
+                <div style={{ marginTop: 28 }} className="empty-box">
+                  <Music size={34} className="pulse-icon" />
+                  <div className="track-name" style={{ fontSize: 16 }}>
+                    Подбираем треки в поток...
+                  </div>
+                  <p className="track-artist" style={{ maxWidth: 380 }}>
+                    Загружаем музыку из Audius и Abyss Cloud
+                  </p>
                 </div>
-                <div className="recent-grid">
-                  {displayedTracks.slice(0, 6).map((track) => {
-                    const isCurrent = currentTrack?.id === track.id;
-                    return (
-                      <div
-                        key={track.id}
-                        className={`recent-card ${isCurrent ? 'is-playing' : ''}`}
-                        onClick={() => handleSelectTrack(track, displayedTracks)}
-                      >
-                        {track.coverUrl ? (
-                          <img
-                            src={track.coverUrl}
-                            alt={track.title}
-                            className="recent-thumb"
-                          />
-                        ) : (
-                          <div className="recent-thumb">
-                            <Music size={18} />
+              )}
+
+              {!isLoadingStream && displayedTracks.length === 0 && (
+                <div style={{ marginTop: 28 }} className="empty-box">
+                  <FolderPlus size={36} />
+                  <div className="track-name" style={{ fontSize: 16 }}>
+                    Медиатека пока пуста
+                  </div>
+                  <p className="track-artist" style={{ maxWidth: 380 }}>
+                    Выбери папку с музыкой на компьютере — Rust-сканер прочитает теги и сохранит треки в локальную базу SQLite, или нажми Play в «Моей волне».
+                  </p>
+                  <button className="btn-primary-pill" onClick={handlePickAndScanFolder}>
+                    Выбрать папку с музыкой
+                  </button>
+                </div>
+              )}
+
+              {!isLoadingStream && displayedTracks.length > 0 && (
+                <>
+                  <div className="section-header-row">
+                    <h2 className="section-heading">Недавно добавлено</h2>
+                  </div>
+                  <div className="recent-grid">
+                    {displayedTracks.slice(0, 6).map((track, idx) => {
+                      const isCurrent = currentTrack?.id === track.id;
+                      return (
+                        <button
+                          key={track.id}
+                          type="button"
+                          className={`recent-card stagger-item ${isCurrent ? 'is-playing' : ''}`}
+                          style={{ animationDelay: `${idx * 45}ms` }}
+                          onClick={() => handleSelectTrack(track, displayedTracks)}
+                        >
+                          {track.coverUrl ? (
+                            <img
+                              src={track.coverUrl}
+                              alt={track.title}
+                              className="recent-thumb"
+                            />
+                          ) : (
+                            <div className="recent-thumb">
+                              <Music size={18} />
+                            </div>
+                          )}
+                          <div className="recent-card-text">
+                            <span className="recent-card-title">{track.title}</span>
+                            <span className="recent-card-artist">{track.artist}</span>
                           </div>
-                        )}
-                        <div className="recent-card-text">
-                          <span className="recent-card-title">{track.title}</span>
-                          <span className="recent-card-artist">{track.artist}</span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
+                        </button>
+                      );
+                    })}
+                  </div>
 
-                <div className="section-header-row" style={{ marginTop: 28 }}>
-                  <h2 className="section-heading">
-                    {onlineTracks.length > 0
-                      ? `Поток «Моей волны» (${displayedTracks.length})`
-                      : `Коллекция треков (${tracks.length})`}
-                  </h2>
+                  <div className="section-header-row">
+                    <h2 className="section-heading">
+                      {onlineTracks.length > 0
+                        ? `Поток «Моей волны» (${displayedTracks.length})`
+                        : `Коллекция треков (${tracks.length})`}
+                    </h2>
+                  </div>
+                  <TrackList
+                    tracks={displayedTracks}
+                    currentTrackId={currentTrack?.id ?? null}
+                    isPlaying={playbackStatus.isPlaying}
+                    onSelectTrack={(track) => handleSelectTrack(track, displayedTracks)}
+                    onToggleFavorite={handleToggleFavorite}
+                  />
+                </>
+              )}
+            </>
+          )}
+
+          {activeTab === 'search' && (
+            <div>
+              <div className="search-bar-wrap">
+                <Search size={17} className="search-input-icon" />
+                <input
+                  type="text"
+                  className="search-input"
+                  placeholder="Поиск треков, исполнителей или жанров (Audius + Abyss API)..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  autoFocus
+                />
+                {searchQuery && (
+                  <button
+                    className="icon-ghost-btn search-clear-btn"
+                    onClick={() => setSearchQuery('')}
+                    title="Очистить"
+                  >
+                    <X size={16} />
+                  </button>
+                )}
+              </div>
+
+              {isLoadingStream ? (
+                <div style={{ marginTop: 28 }} className="empty-box">
+                  <Search size={32} className="pulse-icon" />
+                  <div className="track-name" style={{ fontSize: 16 }}>
+                    Ищем треки в сети...
+                  </div>
                 </div>
+              ) : displayedTracks.length > 0 ? (
                 <TrackList
                   tracks={displayedTracks}
                   currentTrackId={currentTrack?.id ?? null}
@@ -496,136 +556,94 @@ export const App: React.FC = () => {
                   onSelectTrack={(track) => handleSelectTrack(track, displayedTracks)}
                   onToggleFavorite={handleToggleFavorite}
                 />
-              </>
-            )}
-          </>
-        )}
-
-        {activeTab === 'search' && (
-          <div>
-            <div className="search-bar-wrap">
-              <Search size={17} className="search-input-icon" />
-              <input
-                type="text"
-                className="search-input"
-                placeholder="Поиск треков, исполнителей или жанров (Audius + Abyss API)..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                autoFocus
-              />
-              {searchQuery && (
-                <button
-                  className="icon-ghost-btn"
-                  onClick={() => setSearchQuery('')}
-                  title="Очистить"
-                >
-                  <X size={16} />
-                </button>
+              ) : (
+                <div style={{ marginTop: 28 }} className="empty-box">
+                  <Search size={32} />
+                  <div className="track-name" style={{ fontSize: 16 }}>
+                    Ничего не найдено
+                  </div>
+                  <p className="track-artist" style={{ maxWidth: 380 }}>
+                    Введи название трека или исполнителя для поиска по Audius и локальной базе
+                  </p>
+                </div>
               )}
             </div>
+          )}
 
-            {isLoadingStream ? (
-              <div style={{ marginTop: 28 }} className="empty-box">
-                <Search size={32} />
-                <div className="track-name" style={{ fontSize: 16 }}>
-                  Ищем треки в сети...
+          {activeTab === 'favorites' && (
+            <div>
+              <div className="collection-banner">
+                <div className="collection-big-cover">
+                  <Heart size={42} />
+                </div>
+                <div>
+                  <div className="collection-banner-label">Плейлист</div>
+                  <h1 className="collection-banner-title">Мне нравится</h1>
+                  <p className="collection-banner-meta">
+                    Треков: {displayedTracks.length}
+                  </p>
                 </div>
               </div>
-            ) : displayedTracks.length > 0 ? (
-              <TrackList
-                tracks={displayedTracks}
-                currentTrackId={currentTrack?.id ?? null}
-                isPlaying={playbackStatus.isPlaying}
-                onSelectTrack={(track) => handleSelectTrack(track, displayedTracks)}
-                onToggleFavorite={handleToggleFavorite}
-              />
-            ) : (
-              <div style={{ marginTop: 28 }} className="empty-box">
-                <Search size={32} />
-                <div className="track-name" style={{ fontSize: 16 }}>
-                  Ничего не найдено
-                </div>
-                <p className="track-artist" style={{ maxWidth: 380 }}>
-                  Введи название трека или исполнителя для поиска по Audius и локальной базе
-                </p>
-              </div>
-            )}
-          </div>
-        )}
 
-        {activeTab === 'favorites' && (
-          <div>
-            <div className="collection-banner">
-              <div className="collection-big-cover">
-                <Heart size={42} />
-              </div>
-              <div>
-                <div className="collection-banner-label">Плейлист</div>
-                <h1 className="collection-banner-title">Мне нравится</h1>
-                <p className="collection-banner-meta">
-                  Треков: {displayedTracks.length}
-                </p>
-              </div>
+              {displayedTracks.length > 0 ? (
+                <TrackList
+                  tracks={displayedTracks}
+                  currentTrackId={currentTrack?.id ?? null}
+                  isPlaying={playbackStatus.isPlaying}
+                  onSelectTrack={(track) => handleSelectTrack(track, displayedTracks)}
+                  onToggleFavorite={handleToggleFavorite}
+                />
+              ) : (
+                <div style={{ marginTop: 28 }} className="empty-box">
+                  <Heart size={32} />
+                  <div className="track-name" style={{ fontSize: 16 }}>
+                    В избранном пока пусто
+                  </div>
+                  <p className="track-artist" style={{ maxWidth: 380 }}>
+                    Нажимай на сердечко рядом с треками, чтобы сохранять их сюда
+                  </p>
+                </div>
+              )}
             </div>
+          )}
 
-            {displayedTracks.length > 0 ? (
-              <TrackList
-                tracks={displayedTracks}
-                currentTrackId={currentTrack?.id ?? null}
-                isPlaying={playbackStatus.isPlaying}
-                onSelectTrack={(track) => handleSelectTrack(track, displayedTracks)}
-                onToggleFavorite={handleToggleFavorite}
-              />
-            ) : (
-              <div style={{ marginTop: 28 }} className="empty-box">
-                <Heart size={32} />
-                <div className="track-name" style={{ fontSize: 16 }}>
-                  В избранном пока пусто
+          {activeTab === 'playlist' && activePlaylist && (
+            <div>
+              <div className="collection-banner">
+                <div className="collection-big-cover">
+                  <Music size={42} />
                 </div>
-                <p className="track-artist" style={{ maxWidth: 380 }}>
-                  Нажимай на сердечко рядом с треками, чтобы сохранять их сюда
-                </p>
+                <div>
+                  <div className="collection-banner-label">Плейлист</div>
+                  <h1 className="collection-banner-title">{activePlaylist.name}</h1>
+                  <p className="collection-banner-meta">
+                    Треков: {displayedTracks.length}
+                  </p>
+                </div>
               </div>
-            )}
-          </div>
-        )}
 
-        {activeTab === 'playlist' && activePlaylist && (
-          <div>
-            <div className="collection-banner">
-              <div className="collection-big-cover">
-                <Music size={42} />
-              </div>
-              <div>
-                <div className="collection-banner-label">Плейлист</div>
-                <h1 className="collection-banner-title">{activePlaylist.name}</h1>
-                <p className="collection-banner-meta">
-                  Треков: {displayedTracks.length}
-                </p>
-              </div>
+              {displayedTracks.length > 0 ? (
+                <TrackList
+                  tracks={displayedTracks}
+                  currentTrackId={currentTrack?.id ?? null}
+                  isPlaying={playbackStatus.isPlaying}
+                  onSelectTrack={(track) => handleSelectTrack(track, displayedTracks)}
+                  onToggleFavorite={handleToggleFavorite}
+                />
+              ) : (
+                <div style={{ marginTop: 28 }} className="empty-box">
+                  <Music size={32} />
+                  <div className="track-name" style={{ fontSize: 16 }}>
+                    Плейлист пуст
+                  </div>
+                  <p className="track-artist" style={{ maxWidth: 380 }}>
+                    Добавляй треки в этот плейлист из поиска или медиатеки
+                  </p>
+                </div>
+              )}
             </div>
-
-            {displayedTracks.length > 0 ? (
-              <TrackList
-                tracks={displayedTracks}
-                currentTrackId={currentTrack?.id ?? null}
-                isPlaying={playbackStatus.isPlaying}
-                onSelectTrack={(track) => handleSelectTrack(track, displayedTracks)}
-                onToggleFavorite={handleToggleFavorite}
-              />
-            ) : (
-              <div style={{ marginTop: 28 }} className="empty-box">
-                <Music size={32} />
-                <div className="track-name" style={{ fontSize: 16 }}>
-                  Плейлист пуст
-                </div>
-                <p className="track-artist" style={{ maxWidth: 380 }}>
-                  Добавляй треки в этот плейлист из поиска или медиатеки
-                </p>
-              </div>
-            )}
-          </div>
-        )}
+          )}
+        </div>
       </main>
 
       {isQueueOpen && (
@@ -667,31 +685,35 @@ export const App: React.FC = () => {
             Далее в очереди ({activeQueue.length})
           </div>
           <div className="queue-scroll">
-            {activeQueue.map((track) => (
-              <div
-                key={track.id}
-                className="playlist-row"
-                onClick={() => handleSelectTrack(track, activeQueue)}
-              >
-                {track.coverUrl ? (
-                  <img
-                    src={track.coverUrl}
-                    alt={track.title}
-                    className="track-mini-cover"
-                  />
-                ) : (
-                  <div className="track-mini-cover">
-                    <Music size={14} />
+            {activeQueue.map((track) => {
+              const isCurrent = currentTrack?.id === track.id;
+              return (
+                <button
+                  key={track.id}
+                  type="button"
+                  className={`playlist-row ${isCurrent ? 'active' : ''}`}
+                  onClick={() => handleSelectTrack(track, activeQueue)}
+                >
+                  {track.coverUrl ? (
+                    <img
+                      src={track.coverUrl}
+                      alt={track.title}
+                      className="track-mini-cover"
+                    />
+                  ) : (
+                    <div className="track-mini-cover">
+                      <Music size={14} />
+                    </div>
+                  )}
+                  <div className="recent-card-text">
+                    <span className="track-name" style={{ fontSize: 13 }}>
+                      {track.title}
+                    </span>
+                    <span className="track-artist">{track.artist}</span>
                   </div>
-                )}
-                <div className="recent-card-text">
-                  <span className="track-name" style={{ fontSize: 13 }}>
-                    {track.title}
-                  </span>
-                  <span className="track-artist">{track.artist}</span>
-                </div>
-              </div>
-            ))}
+                </button>
+              );
+            })}
           </div>
         </aside>
       )}

@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Play,
   Pause,
@@ -14,6 +14,102 @@ import {
 } from 'lucide-react';
 import { TrackItem, getCoverGradient } from '../shared/models';
 import { formatDuration } from './track_list';
+
+interface SmoothSliderProps {
+  value: number;
+  max: number;
+  onChange: (value: number) => void;
+  commitOnRelease?: boolean;
+  onDragPreview?: (value: number | null) => void;
+  disabled?: boolean;
+  className?: string;
+}
+
+const SmoothSlider: React.FC<SmoothSliderProps> = ({
+  value,
+  max,
+  onChange,
+  commitOnRelease = false,
+  onDragPreview,
+  disabled = false,
+  className = '',
+}) => {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragValue, setDragValue] = useState<number | null>(null);
+
+  const calcValueFromClientX = (clientX: number) => {
+    const el = trackRef.current;
+    if (!el || max <= 0) return 0;
+    const rect = el.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    return ratio * max;
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (disabled || max <= 0) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+
+    const next = calcValueFromClientX(e.clientX);
+    setIsDragging(true);
+    setDragValue(next);
+    onDragPreview?.(next);
+
+    if (!commitOnRelease) {
+      onChange(next);
+    }
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDragging) return;
+    const next = calcValueFromClientX(e.clientX);
+    setDragValue(next);
+    onDragPreview?.(next);
+
+    if (!commitOnRelease) {
+      onChange(next);
+    }
+  };
+
+  const finishDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDragging) return;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+
+    const finalValue = calcValueFromClientX(e.clientX);
+    setIsDragging(false);
+    setDragValue(null);
+    onDragPreview?.(null);
+
+    if (commitOnRelease) {
+      onChange(finalValue);
+    }
+  };
+
+  const displayedValue = isDragging && dragValue !== null ? dragValue : value;
+  const percent = max > 0 ? Math.min(100, Math.max(0, (displayedValue / max) * 100)) : 0;
+
+  return (
+    <div
+      ref={trackRef}
+      role="slider"
+      aria-valuemin={0}
+      aria-valuemax={max}
+      aria-valuenow={Math.round(displayedValue)}
+      className={`slider-track ${isDragging ? 'is-dragging' : ''} ${disabled ? 'is-disabled' : ''} ${className}`}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={finishDrag}
+      onPointerCancel={finishDrag}
+    >
+      <div className="slider-fill" style={{ width: `${percent}%` }}>
+        <span className="slider-thumb" />
+      </div>
+    </div>
+  );
+};
 
 interface PlayerBarProps {
   currentTrack: TrackItem | null;
@@ -56,40 +152,34 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
   onVolumeChange,
   onToggleFavorite,
 }) => {
-  const progressRef = useRef<HTMLDivElement>(null);
-  const volumeRef = useRef<HTMLDivElement>(null);
+  const [previewSec, setPreviewSec] = useState<number | null>(null);
 
   const duration = currentTrack?.durationSeconds ?? 0;
-  const progressPercent = duration > 0 ? Math.min(100, (positionSec / duration) * 100) : 0;
+  const displayedTime = previewSec ?? positionSec;
   const effectiveVolume = isMuted ? 0 : volume;
-
-  const handleProgressClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!progressRef.current || duration <= 0) return;
-    const rect = progressRef.current.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    onSeek(Math.floor(ratio * duration));
-  };
-
-  const handleVolumeClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!volumeRef.current) return;
-    const rect = volumeRef.current.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    onVolumeChange(Number(ratio.toFixed(2)));
-  };
 
   return (
     <footer className="player-dock">
       <div className="player-track-info">
-        <div
-          className="track-mini-cover"
-          style={{
-            background: currentTrack
-              ? getCoverGradient(currentTrack.id)
-              : 'rgba(255,255,255,0.12)',
-          }}
-        >
-          <Music size={17} />
-        </div>
+        {currentTrack?.coverUrl ? (
+          <img
+            src={currentTrack.coverUrl}
+            alt={currentTrack.title}
+            className="track-mini-cover"
+          />
+        ) : (
+          <div
+            className="track-mini-cover"
+            style={{
+              background: currentTrack
+                ? getCoverGradient(currentTrack.id)
+                : 'rgba(255,255,255,0.12)',
+            }}
+          >
+            <Music size={17} />
+          </div>
+        )}
+
         {currentTrack ? (
           <>
             <div style={{ minWidth: 0 }}>
@@ -100,6 +190,7 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
               type="button"
               className="icon-ghost-btn"
               onClick={() => onToggleFavorite(currentTrack.id)}
+              title={currentTrack.isFavorite ? 'Убрать из избранного' : 'В избранное'}
             >
               <Heart
                 size={16}
@@ -157,17 +248,16 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
 
         <div className="progress-row">
           <span className="tabular-time" style={{ fontSize: 11 }}>
-            {formatDuration(positionSec)}
+            {formatDuration(Math.floor(displayedTime))}
           </span>
-          <div
-            ref={progressRef}
-            className="slider-track"
-            onClick={handleProgressClick}
-          >
-            <div className="slider-fill" style={{ width: `${progressPercent}%` }}>
-              <span className="slider-thumb" />
-            </div>
-          </div>
+          <SmoothSlider
+            value={positionSec}
+            max={duration}
+            commitOnRelease={true}
+            onDragPreview={setPreviewSec}
+            onChange={(val) => onSeek(Math.floor(val))}
+            disabled={!currentTrack || duration <= 0}
+          />
           <span className="tabular-time" style={{ fontSize: 11 }}>
             {formatDuration(duration)}
           </span>
@@ -193,16 +283,12 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
           {effectiveVolume === 0 ? <VolumeX size={17} /> : <Volume2 size={17} />}
         </button>
 
-        <div
-          ref={volumeRef}
-          className="slider-track"
-          style={{ maxWidth: 100 }}
-          onClick={handleVolumeClick}
-        >
-          <div className="slider-fill" style={{ width: `${effectiveVolume * 100}%` }}>
-            <span className="slider-thumb" />
-          </div>
-        </div>
+        <SmoothSlider
+          value={effectiveVolume}
+          max={1}
+          onChange={(val) => onVolumeChange(Number(val.toFixed(2)))}
+          className="volume-slider"
+        />
       </div>
     </footer>
   );

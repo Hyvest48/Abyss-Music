@@ -932,3 +932,136 @@ body,
   justify-content: flex-end;
   gap: 10px;
 }
+
+/* ===== ДОПОЛНЕНИЯ ДЛЯ APP.TSX ===== */
+.app-shell {
+  position: relative;
+  isolation: isolate;
+}
+
+/* Динамическая подсветка фона под цвет обложки */
+.ambient-cover-glow {
+  position: fixed;
+  inset: -10%;
+  z-index: -1;
+  background-size: cover;
+  background-position: center;
+  filter: blur(110px) saturate(160%);
+  opacity: 0.14;
+  pointer-events: none;
+  transition: background-image 0.9s ease, opacity 0.6s ease;
+}
+
+/* Плавная смена вкладок */
+.view-transition {
+  animation: fadeSlideUp 0.36s var(--ease-out-expo) both;
+}
+
+/* Каскадное появление карточек */
+.stagger-item {
+  animation: fadeSlideUp 0.4s var(--ease-out-expo) both;
+}
+
+/* Теги Моей волны */
+.wave-hero-content {
+  position: relative;
+  z-index: 2;
+}
+
+.wave-tags-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.wave-active-tag {
+  margin-top: 0;
+}
+
+/* Состояние загрузки кнопки Play */
+.wave-play-btn:disabled,
+.wave-play-btn.is-loading {
+  opacity: 0.65;
+  cursor: wait;
+  transform: none;
+}
+
+/* Кнопка очистки поиска внутри поля */
+.search-input {
+  padding-right: 44px;
+}
+
+.search-clear-btn {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.search-clear-btn:hover {
+  transform: translateY(-50%) scale(1.06);
+}
+
+.search-clear-btn:active {
+  transform: translateY(-50%) scale(0.92);
+}
+
+/* Идеальные пропорции всех обложек */
+img.recent-thumb,
+img.queue-big-art,
+img.track-mini-cover {
+  object-fit: cover;
+  display: block;
+}
+
+/* Пульсация иконок при загрузке */
+@keyframes iconPulse {
+  0%, 100% {
+    opacity: 0.45;
+    transform: scale(0.94);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.06);
+  }
+}
+
+.pulse-icon {
+  color: var(--accent-warm);
+  animation: iconPulse 1.4s ease-in-out infinite;
+}
+
+/* ===== ПЛАВНОЕ ПЕРЕТАСКИВАНИЕ ПОЛЗУНКОВ ===== */
+.slider-track {
+  touch-action: none;
+}
+
+.slider-track.is-disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* При зажатии полоса остаётся широкой, даже если курсор ушёл вверх/вниз */
+.slider-track.is-dragging {
+  height: 6px;
+  background: rgba(255, 255, 255, 0.26);
+  cursor: grabbing;
+}
+
+/* Убираем задержку width при драге — ползунок прилипает к курсору 1-в-1 */
+.slider-track.is-dragging .slider-fill {
+  transition: none;
+}
+
+/* Увеличенный шарик с мягким свечением во время движения */
+.slider-track.is-dragging .slider-thumb {
+  transform: translateY(-50%) scale(1.22);
+  box-shadow: 0 0 0 4px rgba(212, 184, 140, 0.28), 0 2px 10px rgba(0, 0, 0, 0.55);
+}
+
+/* Фиксированная ширина для ползунка громкости */
+.volume-slider {
+  flex: none;
+  width: 96px;
+}
