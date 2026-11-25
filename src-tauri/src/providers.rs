@@ -1,242 +1,535 @@
-use std::time::Duration;
-use serde::Deserialize;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use serde::Serialize;
+use serde_json::{json, Value};
 use crate::models::TrackItem;
 
-const AUDIUS_HOST: &str = "https://discoveryprovider.audius.co/v1";
-const APP_NAME: &str = "AbyssMusic";
+const YM_API: &str = "https://api.music.yandex.net";
+const YM_CLIENT_HEADER: &str = "YandexMusicAndroid/24023621";
+const LRCLIB_API: &str = "https://lrclib.net/api";
 
-#[derive(Deserialize)]
-struct AudiusResponse {
-    data: Vec<AudiusTrack>,
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackLyrics {
+    pub synced_lyrics: Option<String>,
+    pub plain_lyrics: Option<String>,
+    pub instrumental: bool,
 }
 
-#[derive(Deserialize)]
-struct AudiusTrack {
-    id: String,
-    title: String,
-    duration: Option<u64>,
-    genre: Option<String>,
-    user: AudiusUser,
-    artwork: Option<AudiusArtwork>,
+fn iso_timestamp_now() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let days = secs.div_euclid(86400);
+    let sod = secs.rem_euclid(86400);
+
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+
+    let hour = sod / 3600;
+    let min = (sod % 3600) / 60;
+    let sec = sod % 60;
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, m, d, hour, min, sec
+    )
 }
 
-#[derive(Deserialize)]
-struct AudiusUser {
-    name: String,
-}
+fn ym_client(token: &str) -> Result<reqwest::blocking::Client, String> {
+    if token.trim().is_empty() {
+        return Err("Токен Яндекс Музыки не задан. Войдите в аккаунт Яндекс ID.".to_string());
+    }
 
-#[derive(Deserialize)]
-struct AudiusArtwork {
-    #[serde(rename = "480x480")]
-    medium: Option<String>,
-    #[serde(rename = "150x150")]
-    small: Option<String>,
-}
+    let mut headers = reqwest::header::HeaderMap::new();
+    let auth_val = format!("OAuth {}", token.trim());
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        reqwest::header::HeaderValue::from_str(&auth_val).map_err(|e| e.to_string())?,
+    );
+    headers.insert(
+        "X-Yandex-Music-Client",
+        reqwest::header::HeaderValue::from_static(YM_CLIENT_HEADER),
+    );
 
-fn http_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(8))
+        .default_headers(headers)
+        .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| e.to_string())
 }
 
-fn map_audius_track(t: AudiusTrack) -> TrackItem {
-    let cover_url = t.artwork.and_then(|a| a.medium.or(a.small));
+fn extract_track_year(t: &Value) -> Option<u64> {
+    t.get("year")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            t.get("albums")
+                .and_then(|a| a.as_array())
+                .and_then(|a| a.first())
+                .and_then(|a| a.get("year"))
+                .and_then(|v| v.as_u64())
+        })
+        .or_else(|| {
+            t.get("albums")
+                .and_then(|a| a.as_array())
+                .and_then(|a| a.first())
+                .and_then(|a| a.get("releaseDate"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.get(0..4))
+                .and_then(|y| y.parse::<u64>().ok())
+        })
+}
 
-    TrackItem {
-        id: format!("audius-{}", t.id),
-        title: t.title,
-        artist: t.user.name,
-        album: t.genre.unwrap_or_else(|| "Audius Stream".to_string()),
-        duration_seconds: t.duration.unwrap_or(0),
-        source_type: "audius".to_string(),
-        audio_url: format!("{}/tracks/{}/stream?app_name={}", AUDIUS_HOST, t.id, APP_NAME),
+fn parse_ym_track(t: &Value) -> Option<TrackItem> {
+    let id = t.get("id")?.to_string().trim_matches('"').to_string();
+    let title = t.get("title")?.as_str()?.to_string();
+
+    let artist = t
+        .get("artists")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.get("name").and_then(|n| n.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Неизвестный исполнитель".to_string());
+
+    let album_obj = t.get("albums").and_then(|a| a.as_array()).and_then(|a| a.first());
+    let album = album_obj
+        .and_then(|a| a.get("title"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("Яндекс Музыка")
+        .to_string();
+
+    let duration_ms = t.get("durationMs").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let cover_url = t
+        .get("coverUri")
+        .or_else(|| album_obj.and_then(|a| a.get("coverUri")))
+        .and_then(|v| v.as_str())
+        .map(|uri| format!("https://{}", uri.replace("%%", "400x400")));
+
+    Some(TrackItem {
+        id: format!("ym-{}", id),
+        title,
+        artist,
+        album,
+        duration_seconds: duration_ms / 1000,
+        source_type: "yandex".to_string(),
+        audio_url: format!("ym://{}", id),
         cover_url,
         is_favorite: false,
+    })
+}
+
+fn resolve_station_id(genre: Option<&str>) -> &'static str {
+    match genre.map(|g| g.trim()) {
+        Some("Хип-хоп") => "genre:rap",
+        Some("Рок") => "genre:rock",
+        Some("Электроника") => "genre:electronics",
+        Some("Инди") => "genre:indie",
+        Some("Лоу-фай") => "genre:lounge",
+        Some("Акустика") => "genre:bard",
+        _ => "user:onyourwave",
     }
 }
 
-fn map_mood_keyword(mood: &str) -> &'static str {
-    match mood.trim() {
-        "Бодрое" | "Энергичное" => "energetic",
-        "Спокойное" | "Расслабленное" => "chill",
-        "Грустное" | "Меланхоличное" => "sad",
-        "Эпичное" | "Мощное" => "epic",
-        "Романтичное" => "romantic",
-        _ => "vibe",
-    }
-}
-
-fn map_activity_keyword(activity: &str) -> &'static str {
-    match activity.trim() {
-        "Для кода" | "Для фокуса" | "Работа" | "Учёба" => "coding lofi",
-        "Тренировка" | "Спорт" => "workout",
-        "В дорогу" | "За рулём" => "night drive",
-        "Перед сном" | "Отдых" => "ambient",
-        "Вечеринка" => "club",
-        _ => "instrumental",
-    }
-}
-
-fn map_genre_keyword(genre: &str) -> &'static str {
-    match genre.trim() {
-        "Хип-хоп" | "Рэп" => "hip hop",
-        "Электроника" => "electronic",
-        "Фонк" => "phonk",
-        "Рок" => "rock",
-        "Поп" => "pop",
-        "Лоу-фай" | "Lo-Fi" => "lofi",
-        "Джаз" => "jazz",
-        "Классика" => "classical",
-        "Метал" => "metal",
-        _ => "electronic",
-    }
-}
-
-fn map_audius_trending_genre(genre: &str) -> Option<&'static str> {
-    match genre.trim() {
-        "Хип-хоп" | "Рэп" => Some("Hip-Hop/Rap"),
-        "Электроника" | "Фонк" | "Лоу-фай" | "Lo-Fi" => Some("Electronic"),
-        "Рок" => Some("Rock"),
-        "Поп" => Some("Pop"),
-        "Джаз" => Some("Jazz"),
-        "Классика" => Some("Classical"),
-        "Метал" => Some("Metal"),
-        _ => None,
-    }
-}
-
-pub fn search_audius(query: &str) -> Result<Vec<TrackItem>, String> {
-    let client = http_client()?;
-    let url = format!("{}/tracks/search", AUDIUS_HOST);
-    let resp: AudiusResponse = client
+pub fn get_yandex_account_name(token: &str) -> Result<String, String> {
+    let client = ym_client(token)?;
+    let url = format!("{}/account/status", YM_API);
+    let resp: Value = client
         .get(&url)
-        .query(&[("query", query), ("app_name", APP_NAME)])
         .send()
         .map_err(|e| e.to_string())?
         .json()
         .map_err(|e| e.to_string())?;
 
-    Ok(resp.data.into_iter().take(25).map(map_audius_track).collect())
+    let name = resp
+        .pointer("/result/account/displayName")
+        .or_else(|| resp.pointer("/result/account/login"))
+        .and_then(|v| v.as_str())
+        .ok_or("Невалидный токен Яндекс Музыки")?;
+
+    Ok(name.to_string())
 }
 
-fn fetch_audius_trending(genre: Option<&str>) -> Result<Vec<TrackItem>, String> {
-    let client = http_client()?;
-    let url = format!("{}/tracks/trending", AUDIUS_HOST);
-    let mut req = client.get(&url).query(&[("app_name", APP_NAME)]);
-    if let Some(g) = genre.and_then(map_audius_trending_genre) {
-        req = req.query(&[("genre", g)]);
-    }
-
-    let resp: AudiusResponse = req
-        .send()
-        .map_err(|e| e.to_string())?
-        .json()
-        .map_err(|e| e.to_string())?;
-
-    Ok(resp.data.into_iter().take(25).map(map_audius_track).collect())
-}
-
-pub fn wave_audius(
-    mood: Option<&str>,
-    activity: Option<&str>,
-    genre: Option<&str>,
-) -> Result<Vec<TrackItem>, String> {
-    // 1. Пробуем поиск по комбинации переведённых тегов (не более 2-3 слов, чтобы не сужать выдачу до нуля)
-    let mut keywords = Vec::new();
-    if let Some(g) = genre {
-        keywords.push(map_genre_keyword(g));
-    }
-    if let Some(a) = activity {
-        keywords.push(map_activity_keyword(a));
-    } else if let Some(m) = mood {
-        keywords.push(map_mood_keyword(m));
-    }
-
-    if !keywords.is_empty() {
-        let query = keywords.join(" ");
-        if let Ok(tracks) = search_audius(&query) {
-            if !tracks.is_empty() {
-                return Ok(tracks);
-            }
-        }
-    }
-
-    // 2. Если по связке тегов пусто — ищем только по жанру
-    if let Some(g) = genre {
-        if let Ok(tracks) = search_audius(map_genre_keyword(g)) {
-            if !tracks.is_empty() {
-                return Ok(tracks);
-            }
-        }
-    }
-
-    // 3. Резервный вариант — всегда отдаём актуальные тренды Audius (по жанру или общие)
-    fetch_audius_trending(genre)
-}
-
-pub fn search_custom_api(base_url: &str, query: &str) -> Result<Vec<TrackItem>, String> {
-    let clean_base = base_url.trim_end_matches('/');
-    if clean_base.is_empty() {
+pub fn search_yandex(token: &str, query: &str) -> Result<Vec<TrackItem>, String> {
+    if query.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let client = http_client()?;
-    let url = format!("{}/api/tracks/search", clean_base);
-    let mut tracks: Vec<TrackItem> = client
+    let client = ym_client(token)?;
+    let url = format!("{}/search", YM_API);
+    let resp: Value = client
         .get(&url)
-        .query(&[("q", query)])
+        .query(&[("text", query), ("type", "track"), ("page", "0")])
         .send()
         .map_err(|e| e.to_string())?
         .json()
         .map_err(|e| e.to_string())?;
 
-    for t in &mut tracks {
-        t.source_type = "custom".to_string();
-        if t.audio_url.starts_with('/') {
-            t.audio_url = format!("{}{}", clean_base, t.audio_url);
-        }
-    }
+    let tracks = resp
+        .pointer("/result/tracks/results")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(parse_ym_track).collect())
+        .unwrap_or_default();
+
     Ok(tracks)
 }
 
-pub fn wave_custom_api(
-    base_url: &str,
+fn fetch_fresh_2026_releases(
+    client: &reqwest::blocking::Client,
+    token: &str,
+    genre: Option<&str>,
+) -> Vec<TrackItem> {
+    let mut fresh = Vec::new();
+
+    // 1. Забираем витрину свежих релизов Яндекс Музыки (/landing3/new-releases)
+    let landing_url = format!("{}/landing3/new-releases", YM_API);
+    if let Ok(resp) = client.get(&landing_url).send() {
+        if let Ok(json_val) = resp.json::<Value>() {
+            if let Some(album_ids) = json_val
+                .pointer("/result/newReleases")
+                .and_then(|v| v.as_array())
+            {
+                for aid in album_ids.iter().take(6) {
+                    let album_id_str = aid.to_string().trim_matches('"').to_string();
+                    let album_url = format!("{}/albums/{}/with-tracks", YM_API, album_id_str);
+                    if let Ok(a_resp) = client.get(&album_url).send() {
+                        if let Ok(a_json) = a_resp.json::<Value>() {
+                            let year = a_json
+                                .pointer("/result/year")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            if year >= 2026 {
+                                if let Some(volumes) = a_json
+                                    .pointer("/result/volumes")
+                                    .and_then(|v| v.as_array())
+                                {
+                                    for vol in volumes {
+                                        if let Some(t_arr) = vol.as_array() {
+                                            if let Some(first_track) = t_arr.first() {
+                                                if let Some(parsed) = parse_ym_track(first_track) {
+                                                    fresh.push(parsed);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if fresh.len() >= 8 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Если выбран жанр или релизов мало — добираем треки с годом выпуска >= 2026 через поиск
+    if fresh.len() < 6 {
+        let search_q = match genre {
+            Some(g) if !g.trim().is_empty() => format!("{} 2026", g.trim()),
+            _ => "новинки 2026".to_string(),
+        };
+        if let Ok(found) = search_yandex(token, &search_q) {
+            for t in found {
+                if !fresh.iter().any(|x| x.id == t.id) {
+                    fresh.push(t);
+                }
+            }
+        }
+    }
+
+    fresh
+}
+
+pub fn wave_yandex(
+    token: &str,
     mood: Option<&str>,
     activity: Option<&str>,
     character: Option<&str>,
     genre: Option<&str>,
+    queue_track_id: Option<&str>,
 ) -> Result<Vec<TrackItem>, String> {
-    let clean_base = base_url.trim_end_matches('/');
-    if clean_base.is_empty() {
-        return Ok(Vec::new());
-    }
-    let client = http_client()?;
-    let url = format!("{}/api/wave", clean_base);
-    let mut req = client.get(&url);
-    if let Some(v) = mood {
-        req = req.query(&[("mood", v)]);
-    }
-    if let Some(v) = activity {
-        req = req.query(&[("activity", v)]);
-    }
-    if let Some(v) = character {
-        req = req.query(&[("character", v)]);
-    }
-    if let Some(v) = genre {
-        req = req.query(&[("genre", v)]);
+    let client = ym_client(token)?;
+    let station_id = resolve_station_id(genre);
+    let is_new_only = character.map(|c| c.trim() == "Новинки").unwrap_or(false);
+
+    if queue_track_id.is_none() {
+        let mut settings = serde_json::Map::new();
+        if let Some(m) = mood {
+            let val = match m.trim() {
+                "Бодрое" | "Весёлое" => "energetic",
+                "Спокойное" | "Романтичное" => "calm",
+                "Грустное" | "Мрачное" => "sad",
+                _ => "all",
+            };
+            settings.insert("moodEnergy".to_string(), Value::String(val.to_string()));
+        }
+        if let Some(a) = activity {
+            let val = match a.trim() {
+                "Для фокуса" | "Для кода" => "work",
+                "Тренировка" => "workout",
+                "В дорогу" => "road-trip",
+                "Вечерний чилл" | "Ночью" => "fall-asleep",
+                _ => "any",
+            };
+            settings.insert("diversity".to_string(), Value::String(val.to_string()));
+        }
+        if let Some(c) = character {
+            let val = match c.trim() {
+                "Любимое" => "favorite",
+                "Незнакомое" | "Новинки" => "discover",
+                _ => "default",
+            };
+            settings.insert("diversity".to_string(), Value::String(val.to_string()));
+        }
+
+        if !settings.is_empty() {
+            let settings_url = format!("{}/rotor/station/{}/settings2", YM_API, station_id);
+            let _ = client.post(&settings_url).json(&settings).send();
+        }
+
+        let feedback_url = format!("{}/rotor/station/{}/feedback", YM_API, station_id);
+        let _ = client
+            .post(&feedback_url)
+            .json(&json!({
+                "type": "radioStarted",
+                "timestamp": iso_timestamp_now()
+            }))
+            .send();
     }
 
-    let mut tracks: Vec<TrackItem> = req
+    let url = format!("{}/rotor/station/{}/tracks", YM_API, station_id);
+    let mut req = client.get(&url).query(&[("settings2", "true")]);
+
+    if let Some(qid) = queue_track_id {
+        let clean_qid = qid.trim_start_matches("ym-").trim_start_matches("ym://");
+        if !clean_qid.is_empty() {
+            req = req.query(&[("queue", clean_qid)]);
+        }
+    }
+
+    let resp: Value = req
         .send()
         .map_err(|e| e.to_string())?
         .json()
         .map_err(|e| e.to_string())?;
 
-    for t in &mut tracks {
-        t.source_type = "custom".to_string();
-        if t.audio_url.starts_with('/') {
-            t.audio_url = format!("{}{}", clean_base, t.audio_url);
+    let raw_items: Vec<&Value> = resp
+        .pointer("/result/sequence")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|item| item.get("track")).collect())
+        .unwrap_or_default();
+
+    // Если выбран фильтр «Новинки» — оставляем только свежие релизы >= 2026 и подмешиваем витрину новинок
+    if is_new_only {
+        let mut tracks: Vec<TrackItem> = raw_items
+            .iter()
+            .filter(|t| extract_track_year(t).unwrap_or(0) >= 2026)
+            .filter_map(|t| parse_ym_track(t))
+            .collect();
+
+        if tracks.len() < 4 {
+            let fresh = fetch_fresh_2026_releases(&client, token, genre);
+            for t in fresh {
+                if !tracks.iter().any(|x| x.id == t.id) {
+                    tracks.push(t);
+                }
+            }
+        }
+
+        if !tracks.is_empty() {
+            return Ok(tracks);
         }
     }
+
+    let mut tracks: Vec<TrackItem> = raw_items.into_iter().filter_map(parse_ym_track).collect();
+
+    if tracks.is_empty() && station_id != "user:onyourwave" {
+        let fallback_url = format!("{}/rotor/station/user:onyourwave/tracks", YM_API);
+        let fallback_resp: Value = client
+            .get(&fallback_url)
+            .query(&[("settings2", "true")])
+            .send()
+            .map_err(|e| e.to_string())?
+            .json()
+            .map_err(|e| e.to_string())?;
+
+        tracks = fallback_resp
+            .pointer("/result/sequence")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.get("track"))
+                    .filter_map(parse_ym_track)
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+
     Ok(tracks)
+}
+
+pub fn send_yandex_wave_feedback(
+    token: &str,
+    genre: Option<&str>,
+    event_type: &str,
+    track_id: Option<&str>,
+    total_played_seconds: Option<u64>,
+) -> Result<(), String> {
+    let client = ym_client(token)?;
+    let station_id = resolve_station_id(genre);
+    let url = format!("{}/rotor/station/{}/feedback", YM_API, station_id);
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("type".to_string(), Value::String(event_type.to_string()));
+    payload.insert("timestamp".to_string(), Value::String(iso_timestamp_now()));
+
+    if let Some(tid) = track_id {
+        let clean_tid = tid.trim_start_matches("ym-").trim_start_matches("ym://");
+        if !clean_tid.is_empty() {
+            payload.insert("trackId".to_string(), Value::String(clean_tid.to_string()));
+        }
+    }
+
+    if let Some(sec) = total_played_seconds {
+        payload.insert("totalPlayedSeconds".to_string(), json!(sec));
+    }
+
+    let _ = client.post(&url).json(&Value::Object(payload)).send();
+    Ok(())
+}
+
+pub fn resolve_yandex_stream_url(token: &str, raw_id_or_url: &str) -> Result<String, String> {
+    let track_id = raw_id_or_url.trim_start_matches("ym://").trim_start_matches("ym-");
+    let client = ym_client(token)?;
+
+    let info_url = format!("{}/tracks/{}/download-info", YM_API, track_id);
+    let info_resp: Value = client
+        .get(&info_url)
+        .send()
+        .map_err(|e| e.to_string())?
+        .json()
+        .map_err(|e| e.to_string())?;
+
+    let results = info_resp
+        .get("result")
+        .and_then(|v| v.as_array())
+        .ok_or("Не удалось получить download-info от Яндекса")?;
+
+    let best = results
+        .iter()
+        .filter(|item| item.get("codec").and_then(|c| c.as_str()) == Some("mp3"))
+        .max_by_key(|item| item.get("bitrateInKbps").and_then(|b| b.as_u64()).unwrap_or(0))
+        .or_else(|| results.first())
+        .ok_or("Нет доступных потоков для трека")?;
+
+    let download_info_url = best
+        .get("downloadInfoUrl")
+        .and_then(|v| v.as_str())
+        .ok_or("Отсутствует downloadInfoUrl")?;
+
+    let xml_text = client
+        .get(download_info_url)
+        .send()
+        .map_err(|e| e.to_string())?
+        .text()
+        .map_err(|e| e.to_string())?;
+
+    let extract_tag = |tag: &str| -> Result<String, String> {
+        let open = format!("<{}>", tag);
+        let close = format!("</{}>", tag);
+        let start = xml_text.find(&open).ok_or_else(|| format!("Нет тега {}", tag))? + open.len();
+        let end = xml_text[start..].find(&close).ok_or_else(|| format!("Не закрыт тег {}", tag))? + start;
+        Ok(xml_text[start..end].to_string())
+    };
+
+    let host = extract_tag("host")?;
+    let path = extract_tag("path")?;
+    let ts = extract_tag("ts")?;
+    let s = extract_tag("s")?;
+
+    let sign_payload = format!("XGRlBW9FXlekgbPrRHuSiA{}{}", path.trim_start_matches('/'), s);
+    let sign = format!("{:x}", md5::compute(sign_payload.as_bytes()));
+
+    Ok(format!("https://{}/get-mp3/{}/{}{}", host, sign, ts, path))
+}
+
+/// Загрузка синхронизированного текста песни (LRC) через LRCLIB API
+pub fn fetch_lyrics(
+    title: &str,
+    artist: &str,
+    album: &str,
+    duration_seconds: u64,
+) -> Result<TrackLyrics, String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("AbyssMusic/0.1.0 (https://github.com/Hyvest48/Abyss-Music)")
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let primary_artist = artist.split(',').next().unwrap_or(artist).trim();
+    let get_url = format!("{}/get", LRCLIB_API);
+
+    let mut req = client.get(&get_url).query(&[
+        ("track_name", title.trim()),
+        ("artist_name", primary_artist),
+    ]);
+
+    if !album.trim().is_empty() && album != "Яндекс Музыка" && album != "Локальная медиатека" {
+        req = req.query(&[("album_name", album.trim())]);
+    }
+    if duration_seconds > 0 {
+        req = req.query(&[("duration", duration_seconds.to_string().as_str())]);
+    }
+
+    if let Ok(resp) = req.send() {
+        if resp.status().is_success() {
+            if let Ok(val) = resp.json::<Value>() {
+                return Ok(TrackLyrics {
+                    synced_lyrics: val.get("syncedLyrics").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    plain_lyrics: val.get("plainLyrics").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    instrumental: val.get("instrumental").and_then(|v| v.as_bool()).unwrap_or(false),
+                });
+            }
+        }
+    }
+
+    // Резервный поиск по названию и исполнителю
+    let search_url = format!("{}/search", LRCLIB_API);
+    let query = format!("{} {}", primary_artist, title.trim());
+    if let Ok(resp) = client.get(&search_url).query(&[("q", query.as_str())]).send() {
+        if let Ok(Value::Array(arr)) = resp.json::<Value>() {
+            if let Some(best) = arr
+                .iter()
+                .find(|item| item.get("syncedLyrics").and_then(|v| v.as_str()).is_some())
+                .or_else(|| arr.first())
+            {
+                return Ok(TrackLyrics {
+                    synced_lyrics: best.get("syncedLyrics").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    plain_lyrics: best.get("plainLyrics").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    instrumental: best.get("instrumental").and_then(|v| v.as_bool()).unwrap_or(false),
+                });
+            }
+        }
+    }
+
+    Ok(TrackLyrics {
+        synced_lyrics: None,
+        plain_lyrics: None,
+        instrumental: false,
+    })
 }

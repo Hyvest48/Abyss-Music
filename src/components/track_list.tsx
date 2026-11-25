@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { Heart, Music, Clock, Play } from 'lucide-react';
 import { TrackItem, getCoverGradient } from '../shared/models';
 
@@ -15,6 +16,47 @@ export function formatDuration(seconds: number): string {
   const secs = Math.floor(seconds % 60);
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
+
+function resolveCoverSrc(coverUrl?: string): string | null {
+  if (!coverUrl) return null;
+  if (
+    coverUrl.startsWith('http://') ||
+    coverUrl.startsWith('https://') ||
+    coverUrl.startsWith('data:') ||
+    coverUrl.startsWith('asset:')
+  ) {
+    return coverUrl;
+  }
+  return convertFileSrc(coverUrl);
+}
+
+const TrackMiniCover: React.FC<{ track: TrackItem }> = ({ track }) => {
+  const [hasError, setHasError] = useState(false);
+  const src = resolveCoverSrc(track.coverUrl);
+
+  if (src && !hasError) {
+    return (
+      <img
+        src={src}
+        alt={track.title}
+        className="track-mini-cover"
+        style={{ objectFit: 'cover' }}
+        loading="lazy"
+        decoding="async"
+        onError={() => setHasError(true)}
+      />
+    );
+  }
+
+  return (
+    <div
+      className="track-mini-cover"
+      style={{ background: getCoverGradient(track.id) }}
+    >
+      <Music size={15} />
+    </div>
+  );
+};
 
 export const TrackList: React.FC<TrackListProps> = ({
   tracks,
@@ -66,12 +108,7 @@ export const TrackList: React.FC<TrackListProps> = ({
 
               <td>
                 <div className="track-title-cell">
-                  <div
-                    className="track-mini-cover"
-                    style={{ background: getCoverGradient(track.id) }}
-                  >
-                    <Music size={15} />
-                  </div>
+                  <TrackMiniCover track={track} />
                   <div>
                     <div className="track-name">{track.title}</div>
                     <div className="track-artist">{track.artist}</div>

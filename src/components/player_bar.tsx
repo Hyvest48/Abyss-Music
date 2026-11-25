@@ -11,6 +11,8 @@ import {
   VolumeX,
   ListMusic,
   Music,
+  Sliders,
+  MicVocal,
 } from 'lucide-react';
 import { TrackItem, getCoverGradient } from '../shared/models';
 import { formatDuration } from './track_list';
@@ -117,6 +119,8 @@ interface PlayerBarProps {
   isShuffle: boolean;
   isRepeat: boolean;
   isQueueOpen: boolean;
+  isEqOpen: boolean;
+  isLyricsOpen: boolean;
   isMuted: boolean;
   positionSec: number;
   volume: number;
@@ -124,6 +128,7 @@ interface PlayerBarProps {
   onToggleShuffle: () => void;
   onToggleRepeat: () => void;
   onToggleQueue: () => void;
+  onToggleEq: () => void;
   onToggleMute: () => void;
   onPrev: () => void;
   onNext: () => void;
@@ -139,6 +144,8 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
   isShuffle,
   isRepeat,
   isQueueOpen,
+  isEqOpen,
+  isLyricsOpen,
   isMuted,
   positionSec,
   volume,
@@ -146,6 +153,7 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
   onToggleShuffle,
   onToggleRepeat,
   onToggleQueue,
+  onToggleEq,
   onToggleMute,
   onPrev,
   onNext,
@@ -172,7 +180,7 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
             minWidth: 0,
             cursor: currentTrack ? 'pointer' : 'default',
           }}
-          title={currentTrack ? 'Открыть на весь экран (F)' : undefined}
+          title={currentTrack ? 'Открыть на весь экран и текст (F)' : undefined}
         >
           {currentTrack?.coverUrl ? (
             <img
@@ -280,6 +288,25 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
       </div>
 
       <div className="player-right">
+        <button
+          type="button"
+          className={`icon-ghost-btn ${isLyricsOpen ? 'is-active' : ''}`}
+          onClick={onOpenNowPlaying}
+          disabled={!currentTrack}
+          title="Текст песни (F)"
+        >
+          <MicVocal size={17} />
+        </button>
+
+        <button
+          type="button"
+          className={`icon-ghost-btn ${isEqOpen ? 'is-active' : ''}`}
+          onClick={onToggleEq}
+          title="Эквалайзер"
+        >
+          <Sliders size={17} />
+        </button>
+
         <button
           type="button"
           className={`icon-ghost-btn ${isQueueOpen ? 'is-active' : ''}`}

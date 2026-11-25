@@ -1,16 +1,196 @@
-﻿use std::fs::File;
+﻿use std::f32::consts::PI;
+use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Seek};
 use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use rodio::{Decoder, OutputStream, Sink};
+use rodio::source::SeekError;
+use rodio::{Decoder, OutputStream, Sink, Source};
 use crate::models::PlaybackStatus;
+use crate::providers;
 
 trait ReadSeek: Read + Seek + Send + Sync {}
 impl<T: Read + Seek + Send + Sync> ReadSeek for T {}
 
+const EQ_FREQS: [f32; 5] = [60.0, 230.0, 910.0, 3600.0, 14000.0];
+const EQ_Q: f32 = 1.1;
+
+#[derive(Clone, Copy)]
+struct BiquadCoeffs {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+}
+
+impl BiquadCoeffs {
+    fn peaking(sample_rate: f32, freq: f32, q: f32, gain_db: f32) -> Self {
+        if gain_db.abs() < 0.05 || sample_rate <= 0.0 {
+            return Self {
+                b0: 1.0,
+                b1: 0.0,
+                b2: 0.0,
+                a1: 0.0,
+                a2: 0.0,
+            };
+        }
+        let a = 10.0_f32.powf(gain_db / 40.0);
+        let w0 = 2.0 * PI * (freq.min(sample_rate * 0.45)) / sample_rate;
+        let cos_w0 = w0.cos();
+        let sin_w0 = w0.sin();
+        let alpha = sin_w0 / (2.0 * q);
+
+        let b0 = 1.0 + alpha * a;
+        let b1 = -2.0 * cos_w0;
+        let b2 = 1.0 - alpha * a;
+        let a0 = 1.0 + alpha / a;
+        let a1 = -2.0 * cos_w0;
+        let a2 = 1.0 - alpha / a;
+
+        Self {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct BiquadState {
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+
+impl BiquadState {
+    #[inline]
+    fn process(&mut self, x: f32, c: &BiquadCoeffs) -> f32 {
+        let y = c.b0 * x + c.b1 * self.x1 + c.b2 * self.x2 - c.a1 * self.y1 - c.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+}
+
+struct EqualizerSource<S> {
+    inner: S,
+    gains_db: Arc<Mutex<[f32; 5]>>,
+    cached_gains: [f32; 5],
+    coeffs: [BiquadCoeffs; 5],
+    states: [[BiquadState; 5]; 8],
+    channel_idx: usize,
+    sample_rate: u32,
+    channels: u16,
+}
+
+impl<S> EqualizerSource<S>
+where
+    S: Source<Item = i16>,
+{
+    fn new(inner: S, gains_db: Arc<Mutex<[f32; 5]>>) -> Self {
+        let sample_rate = inner.sample_rate().max(8000);
+        let channels = inner.channels().max(1);
+        let initial_gains = gains_db.lock().map(|g| *g).unwrap_or([0.0; 5]);
+        let coeffs = Self::compute_coeffs(sample_rate as f32, &initial_gains);
+
+        Self {
+            inner,
+            gains_db,
+            cached_gains: initial_gains,
+            coeffs,
+            states: [[BiquadState::default(); 5]; 8],
+            channel_idx: 0,
+            sample_rate,
+            channels,
+        }
+    }
+
+    fn compute_coeffs(sr: f32, gains: &[f32; 5]) -> [BiquadCoeffs; 5] {
+        [
+            BiquadCoeffs::peaking(sr, EQ_FREQS[0], EQ_Q, gains[0]),
+            BiquadCoeffs::peaking(sr, EQ_FREQS[1], EQ_Q, gains[1]),
+            BiquadCoeffs::peaking(sr, EQ_FREQS[2], EQ_Q, gains[2]),
+            BiquadCoeffs::peaking(sr, EQ_FREQS[3], EQ_Q, gains[3]),
+            BiquadCoeffs::peaking(sr, EQ_FREQS[4], EQ_Q, gains[4]),
+        ]
+    }
+}
+
+impl<S> Iterator for EqualizerSource<S>
+where
+    S: Source<Item = i16>,
+{
+    type Item = i16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let raw = self.inner.next()?;
+
+        if self.channel_idx == 0 {
+            if let Ok(g) = self.gains_db.try_lock() {
+                if *g != self.cached_gains {
+                    self.cached_gains = *g;
+                    self.coeffs = Self::compute_coeffs(self.sample_rate as f32, &self.cached_gains);
+                }
+            }
+        }
+
+        let ch = self.channel_idx % 8;
+        self.channel_idx = (self.channel_idx + 1) % (self.channels as usize);
+
+        if self.cached_gains.iter().all(|g| g.abs() < 0.05) {
+            return Some(raw);
+        }
+
+        let mut sample = raw as f32 / 32768.0;
+        for band in 0..5 {
+            sample = self.states[ch][band].process(sample, &self.coeffs[band]);
+        }
+
+        let clamped = (sample * 32768.0).clamp(-32768.0, 32767.0) as i16;
+        Some(clamped)
+    }
+}
+
+impl<S> Source for EqualizerSource<S>
+where
+    S: Source<Item = i16>,
+{
+    fn current_frame_len(&self) -> Option<usize> {
+        self.inner.current_frame_len()
+    }
+
+    fn channels(&self) -> u16 {
+        self.inner.channels()
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
+    }
+
+    fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+        self.states = [[BiquadState::default(); 5]; 8];
+        self.channel_idx = 0;
+        self.inner.try_seek(pos)
+    }
+}
+
 enum AudioCommand {
-    Play(String, Sender<Result<(), String>>),
+    Play {
+        source_path: String,
+        ym_token: Option<String>,
+        reply: Sender<Result<(), String>>,
+    },
     Pause,
     Resume,
     Seek(u64, Sender<Result<(), String>>),
@@ -21,12 +201,15 @@ enum AudioCommand {
 
 pub struct AudioPlayer {
     tx: Sender<AudioCommand>,
+    eq_gains: Arc<Mutex<[f32; 5]>>,
 }
 
 impl AudioPlayer {
     pub fn new() -> Result<Self, String> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<AudioCommand>();
         let (init_tx, init_rx) = mpsc::channel::<Result<(), String>>();
+        let eq_gains = Arc::new(Mutex::new([0.0_f32; 5]));
+        let eq_gains_thread = Arc::clone(&eq_gains);
 
         thread::spawn(move || {
             let (_stream, stream_handle) = match OutputStream::try_default() {
@@ -47,37 +230,53 @@ impl AudioPlayer {
 
             while let Ok(cmd) = cmd_rx.recv() {
                 match cmd {
-                    AudioCommand::Play(source_path, reply) => {
+                    AudioCommand::Play {
+                        source_path,
+                        ym_token,
+                        reply,
+                    } => {
                         if let Some(old_sink) = sink.take() {
                             old_sink.stop();
                         }
                         let res = (|| -> Result<(), String> {
-                            let reader: Box<dyn ReadSeek> = if source_path.starts_with("http://")
-                                || source_path.starts_with("https://")
+                            let resolved_source = if source_path.starts_with("ym://") {
+                                let token = ym_token
+                                    .as_deref()
+                                    .filter(|t| !t.trim().is_empty())
+                                    .ok_or("Для воспроизведения треков Яндекс Музыки войдите в Яндекс ID")?;
+                                providers::resolve_yandex_stream_url(token, &source_path)?
+                            } else {
+                                source_path
+                            };
+
+                            let reader: Box<dyn ReadSeek> = if resolved_source.starts_with("http://")
+                                || resolved_source.starts_with("https://")
                             {
                                 let client = reqwest::blocking::Client::builder()
                                     .timeout(Duration::from_secs(20))
                                     .build()
                                     .map_err(|e| format!("Ошибка HTTP-клиента: {}", e))?;
                                 let bytes = client
-                                    .get(&source_path)
+                                    .get(&resolved_source)
                                     .send()
                                     .map_err(|e| format!("Ошибка загрузки потока: {}", e))?
                                     .bytes()
                                     .map_err(|e| format!("Ошибка чтения аудиопотока: {}", e))?;
                                 Box::new(Cursor::new(bytes.to_vec()))
                             } else {
-                                let file = File::open(&source_path)
+                                let file = File::open(&resolved_source)
                                     .map_err(|e| format!("Не удалось открыть файл: {}", e))?;
                                 Box::new(BufReader::new(file))
                             };
 
-                            let source = Decoder::new(reader)
+                            let decoded = Decoder::new(reader)
                                 .map_err(|e| format!("Ошибка декодирования аудио: {}", e))?;
+                            let eq_source = EqualizerSource::new(decoded, Arc::clone(&eq_gains_thread));
+
                             let new_sink = Sink::try_new(&stream_handle)
                                 .map_err(|e| e.to_string())?;
                             new_sink.set_volume(if is_muted { 0.0 } else { volume });
-                            new_sink.append(source);
+                            new_sink.append(eq_source);
                             new_sink.play();
                             sink = Some(new_sink);
                             has_started = true;
@@ -148,13 +347,32 @@ impl AudioPlayer {
         });
 
         init_rx.recv().map_err(|e| e.to_string())??;
-        Ok(Self { tx: cmd_tx })
+        Ok(Self {
+            tx: cmd_tx,
+            eq_gains,
+        })
     }
 
-    pub fn play_file(&self, path: &str) -> Result<(), String> {
+    pub fn set_eq_gains(&self, gains: [f32; 5]) {
+        if let Ok(mut g) = self.eq_gains.lock() {
+            for (i, val) in gains.iter().enumerate() {
+                g[i] = val.clamp(-12.0, 12.0);
+            }
+        }
+    }
+
+    pub fn get_eq_gains(&self) -> [f32; 5] {
+        self.eq_gains.lock().map(|g| *g).unwrap_or([0.0; 5])
+    }
+
+    pub fn play_file(&self, path: &str, ym_token: Option<&str>) -> Result<(), String> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.tx
-            .send(AudioCommand::Play(path.to_string(), reply_tx))
+            .send(AudioCommand::Play {
+                source_path: path.to_string(),
+                ym_token: ym_token.map(|t| t.to_string()),
+                reply: reply_tx,
+            })
             .map_err(|e| e.to_string())?;
         reply_rx.recv().map_err(|e| e.to_string())?
     }

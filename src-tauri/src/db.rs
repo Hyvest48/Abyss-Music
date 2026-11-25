@@ -1,5 +1,5 @@
 ﻿use std::fs;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use tauri::{AppHandle, Manager};
 use crate::models::{PlaylistItem, TrackItem};
 
@@ -31,10 +31,41 @@ pub fn init_database(app: &AppHandle) -> Result<Connection, String> {
             playlist_id TEXT NOT NULL,
             track_id TEXT NOT NULL,
             PRIMARY KEY (playlist_id, track_id)
+        );
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         );"
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
 
     Ok(conn)
+}
+
+pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT value FROM app_settings WHERE key = ?1",
+        params![key],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn delete_setting(conn: &Connection, key: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM app_settings WHERE key = ?1", params![key])
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 pub fn get_all_tracks(conn: &Connection) -> Result<Vec<TrackItem>, String> {

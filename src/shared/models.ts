@@ -4,7 +4,7 @@ export interface TrackItem {
   artist: string;
   album: string;
   durationSeconds: number;
-  sourceType: 'local' | 'online';
+  sourceType: 'local' | 'yandex';
   audioUrl: string;
   coverUrl?: string;
   isFavorite: boolean;

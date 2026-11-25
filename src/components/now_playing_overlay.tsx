@@ -8,9 +8,11 @@ import {
   Heart,
   Music,
   MicVocal,
+  Sliders,
 } from 'lucide-react';
 import { TrackItem, getCoverGradient } from '../shared/models';
 import { formatDuration } from './track_list';
+import { tauriApi } from '../services/tauri_api';
 
 interface LyricLine {
   timeSec: number;
@@ -28,6 +30,7 @@ interface NowPlayingOverlayProps {
   onNext: () => void;
   onSeek: (sec: number) => void;
   onToggleFavorite: (trackId: string) => void;
+  onOpenEq: () => void;
 }
 
 function parseLrc(lrc: string): LyricLine[] {
@@ -58,14 +61,15 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
   onNext,
   onSeek,
   onToggleFavorite,
+  onOpenEq,
 }) => {
   const [syncedLyrics, setSyncedLyrics] = useState<LyricLine[]>([]);
   const [plainLyrics, setPlainLyrics] = useState<string | null>(null);
+  const [isInstrumental, setIsInstrumental] = useState(false);
   const [isLoadingLyrics, setIsLoadingLyrics] = useState(false);
   const activeLineRef = useRef<HTMLButtonElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Загрузка текстов с LRCLIB (бесплатно, без API-ключей)
   useEffect(() => {
     if (!isOpen || !track) return;
     let cancelled = false;
@@ -74,35 +78,30 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
       setIsLoadingLyrics(true);
       setSyncedLyrics([]);
       setPlainLyrics(null);
+      setIsInstrumental(false);
       try {
-        const params = new URLSearchParams({
-          track_name: track.title,
-          artist_name: track.artist,
-        });
-        const res = await fetch(`https://lrclib.net/api/get?${params.toString()}`);
-        if (!res.ok) throw new Error('Not found');
-        const data = await res.json();
+        const data = await tauriApi.getTrackLyrics(track);
         if (cancelled) return;
 
         if (data.syncedLyrics) {
           setSyncedLyrics(parseLrc(data.syncedLyrics));
         } else if (data.plainLyrics) {
           setPlainLyrics(data.plainLyrics);
+        } else if (data.instrumental) {
+          setIsInstrumental(true);
         }
       } catch {
-        // Текст не найден — покажем аккуратную заглушку
       } finally {
         if (!cancelled) setIsLoadingLyrics(false);
       }
     };
 
-    loadLyrics();
+    void loadLyrics();
     return () => {
       cancelled = true;
     };
   }, [isOpen, track?.id]);
 
-  // Активная строка текста
   const activeIndex = useMemo(() => {
     if (syncedLyrics.length === 0) return -1;
     let idx = -1;
@@ -116,7 +115,6 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
     return idx;
   }, [syncedLyrics, positionSec]);
 
-  // Плавный автоскролл к активной строке
   useEffect(() => {
     activeLineRef.current?.scrollIntoView({
       behavior: 'smooth',
@@ -124,7 +122,6 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
     });
   }, [activeIndex]);
 
-  // Живой canvas-визуализатор
   useEffect(() => {
     if (!isOpen) return;
     const canvas = canvasRef.current;
@@ -150,8 +147,8 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
       for (let i = 0; i < bars; i++) {
         const wave = isPlaying
           ? (Math.sin(time * 0.0045 + i * 0.55) * 0.5 + 0.5) *
-            (Math.cos(time * 0.0028 - i * 0.3) * 0.5 + 0.5) *
-            (h - 6) +
+              (Math.cos(time * 0.0028 - i * 0.3) * 0.5 + 0.5) *
+              (h - 6) +
             5
           : 4;
         heights[i] += (wave - heights[i]) * 0.16;
@@ -191,11 +188,12 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
           <ChevronDown size={22} />
         </button>
         <span className="now-playing-badge">Сейчас играет</span>
-        <div style={{ width: 34 }} />
+        <button className="icon-ghost-btn" onClick={onOpenEq} title="Эквалайзер">
+          <Sliders size={19} />
+        </button>
       </div>
 
       <div className="now-playing-grid">
-        {/* Левая колонка: обложка + управление + визуализатор */}
         <div className="now-playing-left">
           <div className={`now-playing-cover-wrap ${isPlaying ? 'is-playing' : ''}`}>
             {track.coverUrl ? (
@@ -251,7 +249,6 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
           </div>
         </div>
 
-        {/* Правая колонка: синхронизированные тексты */}
         <div className="now-playing-lyrics">
           {isLoadingLyrics && (
             <div className="lyrics-placeholder">
@@ -289,7 +286,11 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
           {!isLoadingLyrics && syncedLyrics.length === 0 && !plainLyrics && (
             <div className="lyrics-placeholder">
               <MicVocal size={32} style={{ opacity: 0.4 }} />
-              <span>Текст для этого трека пока недоступен</span>
+              <span>
+                {isInstrumental
+                  ? 'Инструментальная композиция без слов'
+                  : 'Текст для этого трека пока недоступен'}
+              </span>
             </div>
           )}
         </div>

@@ -1,6 +1,7 @@
 import React from 'react';
-import { Home, Heart, Palette, Plus, FolderPlus, Music } from 'lucide-react';
+import { Home, Heart, Palette, Plus, FolderPlus, Music, LogIn, LogOut, UserCheck } from 'lucide-react';
 import { PlaylistItem, getCoverGradient } from '../shared/models';
+import { YandexAuthStatus } from '../services/tauri_api';
 
 export type NavTab = 'home' | 'search' | 'favorites' | 'playlist';
 
@@ -8,22 +9,28 @@ interface SidebarProps {
   activeTab: NavTab;
   activePlaylistId: string | null;
   playlists: PlaylistItem[];
+  yandexAuth: YandexAuthStatus;
   onSelectTab: (tab: NavTab) => void;
   onSelectPlaylist: (playlistId: string) => void;
   onCreatePlaylist: () => void;
   onScanFolder: () => void;
   onOpenThemes: () => void;
+  onYandexLogin: () => void;
+  onYandexLogout: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
   activeTab,
   activePlaylistId,
   playlists,
+  yandexAuth,
   onSelectTab,
   onSelectPlaylist,
   onCreatePlaylist,
   onScanFolder,
   onOpenThemes,
+  onYandexLogin,
+  onYandexLogout,
 }) => {
   return (
     <aside className="sidebar">
@@ -61,6 +68,49 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </span>
           <span>Темы</span>
         </button>
+
+        {yandexAuth.isAuthorized ? (
+          <div
+            className="nav-pill"
+            style={{ justifyContent: 'space-between', cursor: 'default' }}
+            title="Аккаунт Яндекс Музыки подключён"
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+              <span className="nav-pill-icon" style={{ color: 'var(--accent-warm)' }}>
+                <UserCheck size={16} />
+              </span>
+              <span
+                style={{
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {yandexAuth.accountName || 'Яндекс Плюс'}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="icon-ghost-btn"
+              onClick={onYandexLogout}
+              title="Выйти из Яндекс ID"
+            >
+              <LogOut size={14} />
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="nav-pill"
+            onClick={onYandexLogin}
+            title="Подключить Яндекс Музыку"
+          >
+            <span className="nav-pill-icon" style={{ color: '#fc3f1d' }}>
+              <LogIn size={16} />
+            </span>
+            <span>Войти в Яндекс</span>
+          </button>
+        )}
       </nav>
 
       <div className="collection-section">

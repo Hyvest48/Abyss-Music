@@ -6,14 +6,48 @@ mod scanner;
 
 use std::sync::Mutex;
 use rusqlite::Connection;
-use tauri::{Manager, State};
+use serde::Serialize;
+use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use audio::AudioPlayer;
 use models::{PlaybackStatus, PlaylistItem, TrackItem};
+use providers::TrackLyrics;
 
 pub struct AppState {
     pub db: Mutex<Connection>,
     pub player: Mutex<AudioPlayer>,
-    pub custom_api_url: Mutex<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct YandexAuthStatus {
+    pub is_authorized: bool,
+    pub account_name: Option<String>,
+}
+
+fn persist_yandex_token(app: &tauri::AppHandle, raw_token: &str) {
+    let clean_token = raw_token.trim().to_string();
+    if clean_token.is_empty() {
+        return;
+    }
+
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(conn) = state.db.lock() {
+            let _ = db::set_setting(&conn, "yandex_token", &clean_token);
+        }
+    }
+
+    let account_name = providers::get_yandex_account_name(&clean_token).ok();
+    let _ = app.emit(
+        "yandex-auth-success",
+        YandexAuthStatus {
+            is_authorized: true,
+            account_name,
+        },
+    );
+
+    if let Some(win) = app.get_webview_window("yandex-auth") {
+        let _ = win.close();
+    }
 }
 
 #[tauri::command]
@@ -31,68 +65,213 @@ fn scan_folder(folder_path: String, state: State<AppState>) -> Result<Vec<TrackI
 }
 
 #[tauri::command]
-fn set_custom_api_url(url: String, state: State<AppState>) -> Result<(), String> {
-    let mut api_url = state.custom_api_url.lock().map_err(|e| e.to_string())?;
-    *api_url = url.trim().to_string();
+fn get_yandex_status(state: State<AppState>) -> Result<YandexAuthStatus, String> {
+    let token_opt = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::get_setting(&conn, "yandex_token")?
+    };
+
+    if let Some(token) = token_opt {
+        if !token.trim().is_empty() {
+            if let Ok(name) = providers::get_yandex_account_name(&token) {
+                return Ok(YandexAuthStatus {
+                    is_authorized: true,
+                    account_name: Some(name),
+                });
+            }
+        }
+    }
+
+    Ok(YandexAuthStatus {
+        is_authorized: false,
+        account_name: None,
+    })
+}
+
+#[tauri::command]
+fn save_yandex_token(app: tauri::AppHandle, token: String) -> Result<(), String> {
+    persist_yandex_token(&app, &token);
     Ok(())
 }
 
 #[tauri::command]
-fn search_online_tracks(query: String, state: State<AppState>) -> Result<Vec<TrackItem>, String> {
-    let custom_url = state.custom_api_url.lock().map_err(|e| e.to_string())?.clone();
-    let mut results = Vec::new();
-
-    // 1. Сначала запрашиваем ваш с Арсением API (если сервер недоступен — не ломаем поиск)
-    if let Ok(custom_tracks) = providers::search_custom_api(&custom_url, &query) {
-        results.extend(custom_tracks);
-    }
-
-    // 2. Подмешиваем треки из Audius
-    if let Ok(audius_tracks) = providers::search_audius(&query) {
-        results.extend(audius_tracks);
-    }
-
-    Ok(results)
+fn logout_yandex(state: State<AppState>) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::delete_setting(&conn, "yandex_token")
 }
 
 #[tauri::command]
-fn get_wave_tracks(
+async fn open_yandex_auth(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(existing) = app.get_webview_window("yandex-auth") {
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let auth_url = "https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d";
+    let app_handle = app.clone();
+
+    let hash_watcher_script = r#"
+        (function() {
+            function checkToken() {
+                const source = (window.location.hash || '') + '&' + (window.location.search || '');
+                const match = source.match(/access_token=([^&]+)/);
+                if (match && match[1]) {
+                    window.location.href = 'https://abyss-auth-callback.local/?token=' + encodeURIComponent(match[1]);
+                }
+            }
+            checkToken();
+            window.addEventListener('hashchange', checkToken);
+            setInterval(checkToken, 400);
+        })();
+    "#;
+
+    WebviewWindowBuilder::new(
+        &app,
+        "yandex-auth",
+        WebviewUrl::External(auth_url.parse().map_err(|e| format!("{}", e))?),
+    )
+    .title("Вход через Яндекс ID — Abyss Music")
+    .inner_size(480.0, 680.0)
+    .initialization_script(hash_watcher_script)
+    .on_navigation(move |url| {
+        let url_str = url.as_str();
+
+        if let Some(rest) = url_str.strip_prefix("https://abyss-auth-callback.local/?token=") {
+            let token = rest.split('&').next().unwrap_or("");
+            persist_yandex_token(&app_handle, token);
+            return false;
+        }
+
+        if let Some(fragment) = url.fragment() {
+            for pair in fragment.split('&') {
+                if let Some(token) = pair.strip_prefix("access_token=") {
+                    persist_yandex_token(&app_handle, token);
+                    return false;
+                }
+            }
+        }
+
+        if let Some(query) = url.query() {
+            for pair in query.split('&') {
+                if let Some(token) = pair.strip_prefix("access_token=") {
+                    persist_yandex_token(&app_handle, token);
+                    return false;
+                }
+            }
+        }
+
+        url_str == "about:blank"
+            || url_str.starts_with("https://")
+            || url_str.starts_with("http://")
+    })
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn search_yandex_tracks(query: String, state: State<AppState>) -> Result<Vec<TrackItem>, String> {
+    let token = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::get_setting(&conn, "yandex_token")?.unwrap_or_default()
+    };
+    if token.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    providers::search_yandex(&token, &query)
+}
+
+#[tauri::command]
+fn get_yandex_wave(
     mood: Option<String>,
     activity: Option<String>,
     character: Option<String>,
     genre: Option<String>,
+    queue_track_id: Option<String>,
     state: State<AppState>,
 ) -> Result<Vec<TrackItem>, String> {
-    let custom_url = state.custom_api_url.lock().map_err(|e| e.to_string())?.clone();
-    let mut results = Vec::new();
-
-    if let Ok(custom_tracks) = providers::wave_custom_api(
-        &custom_url,
+    let token = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::get_setting(&conn, "yandex_token")?.unwrap_or_default()
+    };
+    providers::wave_yandex(
+        &token,
         mood.as_deref(),
         activity.as_deref(),
         character.as_deref(),
         genre.as_deref(),
-    ) {
-        results.extend(custom_tracks);
-    }
+        queue_track_id.as_deref(),
+    )
+}
 
-    if let Ok(audius_tracks) =
-        providers::wave_audius(mood.as_deref(), activity.as_deref(), genre.as_deref())
+#[tauri::command]
+fn send_wave_feedback(
+    genre: Option<String>,
+    event_type: String,
+    track_id: Option<String>,
+    total_played_seconds: Option<u64>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let token = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::get_setting(&conn, "yandex_token")?.unwrap_or_default()
+    };
+    if token.trim().is_empty() {
+        return Ok(());
+    }
+    providers::send_yandex_wave_feedback(
+        &token,
+        genre.as_deref(),
+        &event_type,
+        track_id.as_deref(),
+        total_played_seconds,
+    )
+}
+
+#[tauri::command]
+fn get_track_lyrics(
+    title: String,
+    artist: String,
+    album: String,
+    duration_seconds: u64,
+) -> Result<TrackLyrics, String> {
+    providers::fetch_lyrics(&title, &artist, &album, duration_seconds)
+}
+
+#[tauri::command]
+fn set_eq_gains(gains: Vec<f32>, state: State<AppState>) -> Result<(), String> {
+    let mut arr = [0.0_f32; 5];
+    for (i, val) in gains.iter().take(5).enumerate() {
+        arr[i] = *val;
+    }
     {
-        results.extend(audius_tracks);
+        let player = state.player.lock().map_err(|e| e.to_string())?;
+        player.set_eq_gains(arr);
     }
+    if let Ok(json_str) = serde_json::to_string(&arr) {
+        if let Ok(conn) = state.db.lock() {
+            let _ = db::set_setting(&conn, "eq_gains", &json_str);
+        }
+    }
+    Ok(())
+}
 
-    Ok(results)
+#[tauri::command]
+fn get_eq_gains(state: State<AppState>) -> Result<Vec<f32>, String> {
+    let player = state.player.lock().map_err(|e| e.to_string())?;
+    Ok(player.get_eq_gains().to_vec())
 }
 
 #[tauri::command]
 fn play_track(track_id: String, audio_url: String, state: State<AppState>) -> Result<(), String> {
-    {
+    let ym_token = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let _ = db::record_play(&conn, &track_id);
-    }
+        db::get_setting(&conn, "yandex_token")?
+    };
     let player = state.player.lock().map_err(|e| e.to_string())?;
-    player.play_file(&audio_url)
+    player.play_file(&audio_url, ym_token.as_deref())
 }
 
 #[tauri::command]
@@ -170,19 +349,30 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             let conn = db::init_database(app.handle()).expect("Ошибка инициализации SQLite");
+            if let Ok(Some(saved_eq)) = db::get_setting(&conn, "eq_gains") {
+                if let Ok(arr) = serde_json::from_str::<[f32; 5]>(&saved_eq) {
+                    audio_player.set_eq_gains(arr);
+                }
+            }
             app.manage(AppState {
                 db: Mutex::new(conn),
                 player: Mutex::new(audio_player),
-                custom_api_url: Mutex::new("http://localhost:8000".to_string()),
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_tracks,
             scan_folder,
-            set_custom_api_url,
-            search_online_tracks,
-            get_wave_tracks,
+            get_yandex_status,
+            save_yandex_token,
+            logout_yandex,
+            open_yandex_auth,
+            search_yandex_tracks,
+            get_yandex_wave,
+            send_wave_feedback,
+            get_track_lyrics,
+            set_eq_gains,
+            get_eq_gains,
             play_track,
             pause_track,
             resume_track,
