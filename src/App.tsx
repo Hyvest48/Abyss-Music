@@ -1,4 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, {
+  startTransition,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   Play,
   Pause,
@@ -13,6 +20,10 @@ import { Sidebar, NavTab } from './components/sidebar';
 import { WaveModal } from './components/wave_modal';
 import { TrackList } from './components/track_list';
 import { PlayerBar } from './components/player_bar';
+import { NowPlayingOverlay } from './components/now_playing_overlay';
+import { CommandPalette } from './components/command_palette';
+import { ThemeModal } from './components/theme_modal';
+import { THEME_PRESETS, ThemePreset } from './shared/themes';
 import {
   PlaybackStatus,
   PlaylistItem,
@@ -21,16 +32,99 @@ import {
 } from './shared/models';
 import { tauriApi } from './services/tauri_api';
 
+interface TopSearchBarProps {
+  externalValue: string;
+  onSearchCommit: (value: string) => void;
+}
+
+const TopSearchBar: React.FC<TopSearchBarProps> = React.memo(
+  ({ externalValue, onSearchCommit }) => {
+    const [localValue, setLocalValue] = useState(externalValue);
+    const lastCommittedRef = useRef(externalValue);
+
+    useEffect(() => {
+      if (externalValue !== lastCommittedRef.current) {
+        lastCommittedRef.current = externalValue;
+        setLocalValue(externalValue);
+      }
+    }, [externalValue]);
+
+    useEffect(() => {
+      const timer = setTimeout(() => {
+        if (localValue !== lastCommittedRef.current) {
+          lastCommittedRef.current = localValue;
+          onSearchCommit(localValue);
+        }
+      }, 300);
+      return () => clearTimeout(timer);
+    }, [localValue, onSearchCommit]);
+
+    const handleImmediateSubmit = () => {
+      if (localValue !== lastCommittedRef.current) {
+        lastCommittedRef.current = localValue;
+        onSearchCommit(localValue);
+      }
+    };
+
+    return (
+      <header className="top-search-header">
+        <div className="search-bar-wrap">
+          <Search size={17} className="search-input-icon" />
+          <input
+            type="text"
+            className="search-input"
+            placeholder="Поиск треков, исполнителей или жанров..."
+            value={localValue}
+            onChange={(e) => setLocalValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleImmediateSubmit();
+            }}
+          />
+          {localValue ? (
+            <button
+              type="button"
+              className="icon-ghost-btn search-clear-btn"
+              onClick={() => {
+                setLocalValue('');
+                lastCommittedRef.current = '';
+                onSearchCommit('');
+              }}
+              title="Очистить"
+            >
+              <X size={16} />
+            </button>
+          ) : (
+            <kbd className="search-kbd">Ctrl K</kbd>
+          )}
+        </div>
+      </header>
+    );
+  }
+);
+
+const INITIAL_RENDER_LIMIT = 40;
+
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<NavTab>('home');
   const [activePlaylistId, setActivePlaylistId] = useState<string | null>(null);
   const [tracks, setTracks] = useState<TrackItem[]>([]);
   const [onlineTracks, setOnlineTracks] = useState<TrackItem[]>([]);
+  const [searchResults, setSearchResults] = useState<TrackItem[]>([]);
   const [playlists, setPlaylists] = useState<PlaylistItem[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoadingStream, setIsLoadingStream] = useState(false);
+  const [isSearchingApi, setIsSearchingApi] = useState(false);
+  const [renderLimit, setRenderLimit] = useState(INITIAL_RENDER_LIMIT);
 
-  // Настройки «Моей волны» сброшены при запуске
+  const [savedOnlineFavs, setSavedOnlineFavs] = useState<TrackItem[]>(() => {
+    try {
+      const raw = localStorage.getItem('abyss-online-favs');
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+
   const [waveSettings, setWaveSettings] = useState<WaveSettings>({
     mood: null,
     activity: null,
@@ -39,7 +133,14 @@ export const App: React.FC = () => {
   });
   const [isWaveModalOpen, setIsWaveModalOpen] = useState(false);
 
-  // Состояние плеера
+  const [isNowPlayingOpen, setIsNowPlayingOpen] = useState(false);
+  const [isCmdOpen, setIsCmdOpen] = useState(false);
+
+  const [isThemeModalOpen, setIsThemeModalOpen] = useState(false);
+  const [currentThemeId, setCurrentThemeId] = useState<string>(
+    () => localStorage.getItem('abyss-theme') || 'abyss-violet'
+  );
+
   const [currentTrack, setCurrentTrack] = useState<TrackItem | null>(null);
   const [queue, setQueue] = useState<TrackItem[]>([]);
   const [isShuffle, setIsShuffle] = useState(false);
@@ -52,6 +153,92 @@ export const App: React.FC = () => {
     isMuted: false,
     isFinished: false,
   });
+
+  const isTransitioningRef = useRef(false);
+  const bloomRef = useRef<HTMLDivElement>(null);
+  const searchCacheRef = useRef(new Map<string, TrackItem[]>());
+  const allTracksRef = useRef<TrackItem[]>([]);
+
+  // Применение выбранной темы
+  useEffect(() => {
+    const theme =
+      THEME_PRESETS.find((t) => t.id === currentThemeId) || THEME_PRESETS[0];
+    const root = document.documentElement;
+    root.style.setProperty('--accent-warm', theme.accent);
+    root.style.setProperty('--accent-secondary', theme.accent2);
+    root.style.setProperty('--accent-glow', theme.glow);
+    root.style.setProperty('--bg-base', theme.bgBase);
+    root.style.setProperty('--sidebar-top', theme.sidebarTop);
+    localStorage.setItem('abyss-theme', theme.id);
+  }, [currentThemeId]);
+
+  // Идеально центрированный и плавный белый блум за курсором
+  useEffect(() => {
+    const el = bloomRef.current;
+    if (!el) return;
+
+    let targetX = 0;
+    let targetY = 0;
+    let curX = 0;
+    let curY = 0;
+    let isInitialized = false;
+    let rafId = 0;
+
+    const animate = () => {
+      if (!isInitialized) {
+        rafId = 0;
+        return;
+      }
+
+      const dx = targetX - curX;
+      const dy = targetY - curY;
+
+      if (Math.abs(dx) < 0.15 && Math.abs(dy) < 0.15) {
+        curX = targetX;
+        curY = targetY;
+        el.style.transform = `translate3d(${curX}px, ${curY}px, 0)`;
+        rafId = 0;
+        return;
+      }
+
+      curX += dx * 0.14;
+      curY += dy * 0.14;
+      el.style.transform = `translate3d(${curX.toFixed(2)}px, ${curY.toFixed(2)}px, 0)`;
+      rafId = requestAnimationFrame(animate);
+    };
+
+    const onMove = (e: PointerEvent) => {
+      targetX = e.clientX;
+      targetY = e.clientY;
+
+      if (!isInitialized) {
+        isInitialized = true;
+        curX = targetX;
+        curY = targetY;
+        el.style.transform = `translate3d(${curX}px, ${curY}px, 0)`;
+        el.style.opacity = '1';
+        return;
+      }
+
+      if (!rafId) {
+        rafId = requestAnimationFrame(animate);
+      }
+    };
+
+    const onLeave = () => {
+      isInitialized = false;
+      el.style.opacity = '0';
+    };
+
+    window.addEventListener('pointermove', onMove, { passive: true });
+    document.addEventListener('mouseleave', onLeave);
+
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      document.removeEventListener('mouseleave', onLeave);
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, []);
 
   // Загрузка локальной базы SQLite при старте
   useEffect(() => {
@@ -70,47 +257,87 @@ export const App: React.FC = () => {
     initData();
   }, []);
 
-  // Живой поиск по Audius + Abyss API (задержка 400 мс)
+  // Быстрый поиск без лагов, с кэшированием и отменой устаревших запросов
   useEffect(() => {
-    if (activeTab !== 'search') return;
     const trimmed = searchQuery.trim();
+    setRenderLimit(INITIAL_RENDER_LIMIT);
+
     if (!trimmed) {
-      setOnlineTracks([]);
+      setIsSearchingApi(false);
+      startTransition(() => {
+        setSearchResults([]);
+      });
       return;
     }
 
-    const timer = setTimeout(async () => {
-      setIsLoadingStream(true);
+    const cacheKey = trimmed.toLowerCase();
+    const cached = searchCacheRef.current.get(cacheKey);
+    if (cached) {
+      setIsSearchingApi(false);
+      startTransition(() => {
+        setSearchResults(cached);
+      });
+      return;
+    }
+
+    let cancelled = false;
+    setIsSearchingApi(true);
+
+    const runSearch = async () => {
       try {
         const found = await tauriApi.searchOnlineTracks(trimmed);
-        setOnlineTracks(found);
-      } catch (err) {
-        console.error('Ошибка онлайн-поиска:', err);
-      } finally {
-        setIsLoadingStream(false);
-      }
-    }, 400);
+        if (cancelled) return;
 
-    return () => clearTimeout(timer);
-  }, [searchQuery, activeTab]);
+        searchCacheRef.current.set(cacheKey, found);
+        if (searchCacheRef.current.size > 30) {
+          const firstKey = searchCacheRef.current.keys().next().value;
+          if (firstKey !== undefined) searchCacheRef.current.delete(firstKey);
+        }
+
+        startTransition(() => {
+          setSearchResults(found);
+        });
+      } catch (err) {
+        if (!cancelled) {
+          console.error('Ошибка онлайн-поиска:', err);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsSearchingApi(false);
+        }
+      }
+    };
+
+    runSearch();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [searchQuery]);
 
   // Запуск выбранного трека
   const handleSelectTrack = useCallback(
     async (track: TrackItem, customQueue?: TrackItem[]) => {
+      isTransitioningRef.current = true;
       try {
         if (customQueue) {
           setQueue(customQueue);
         }
         setCurrentTrack(track);
-        await tauriApi.playTrack(track.id, track.audioUrl);
         setPlaybackStatus((prev) => ({
           ...prev,
           isPlaying: true,
           positionSec: 0,
           isFinished: false,
         }));
+        await tauriApi.playTrack(track.id, track.audioUrl);
       } catch (err) {
         console.error('Ошибка воспроизведения:', err);
+        setPlaybackStatus((prev) => ({ ...prev, isPlaying: false }));
+      } finally {
+        setTimeout(() => {
+          isTransitioningRef.current = false;
+        }, 300);
       }
     },
     []
@@ -169,10 +396,12 @@ export const App: React.FC = () => {
     if (!currentTrack) return;
 
     const interval = setInterval(async () => {
+      if (isTransitioningRef.current) return;
       try {
         const status = await tauriApi.getPlaybackStatus();
+        if (isTransitioningRef.current) return;
         setPlaybackStatus(status);
-        if (status.isFinished) {
+        if (status.isFinished && status.positionSec > 1) {
           await handleNextTrack();
         }
       } catch (err) {
@@ -184,21 +413,24 @@ export const App: React.FC = () => {
   }, [currentTrack, handleNextTrack]);
 
   // Запуск потока «Моей волны»
-  const handleStartWave = async (overrideSettings?: WaveSettings) => {
-    const activeSettings = overrideSettings ?? waveSettings;
-    setIsLoadingStream(true);
-    try {
-      const waveTracks = await tauriApi.getWaveTracks(activeSettings);
-      if (waveTracks.length > 0) {
-        setOnlineTracks(waveTracks);
-        await handleSelectTrack(waveTracks[0], waveTracks);
+  const handleStartWave = useCallback(
+    async (overrideSettings?: WaveSettings) => {
+      const activeSettings = overrideSettings ?? waveSettings;
+      setIsLoadingStream(true);
+      try {
+        const waveTracks = await tauriApi.getWaveTracks(activeSettings);
+        if (waveTracks.length > 0) {
+          setOnlineTracks(waveTracks);
+          await handleSelectTrack(waveTracks[0], waveTracks);
+        }
+      } catch (err) {
+        console.error('Ошибка запуска Моей волны:', err);
+      } finally {
+        setIsLoadingStream(false);
       }
-    } catch (err) {
-      console.error('Ошибка запуска Моей волны:', err);
-    } finally {
-      setIsLoadingStream(false);
-    }
-  };
+    },
+    [waveSettings, handleSelectTrack]
+  );
 
   const handlePickAndScanFolder = async () => {
     try {
@@ -211,7 +443,7 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleTogglePlay = async () => {
+  const handleTogglePlay = useCallback(async () => {
     if (!currentTrack) {
       const fallbackList = onlineTracks.length > 0 ? onlineTracks : tracks;
       if (fallbackList.length > 0) {
@@ -222,6 +454,12 @@ export const App: React.FC = () => {
       return;
     }
 
+    if (playbackStatus.isFinished) {
+      await handleSelectTrack(currentTrack);
+      return;
+    }
+
+    isTransitioningRef.current = true;
     try {
       if (playbackStatus.isPlaying) {
         await tauriApi.pauseTrack();
@@ -232,19 +470,36 @@ export const App: React.FC = () => {
       }
     } catch (err) {
       console.error('Ошибка паузы/старта:', err);
+    } finally {
+      setTimeout(() => {
+        isTransitioningRef.current = false;
+      }, 250);
     }
-  };
+  }, [
+    currentTrack,
+    onlineTracks,
+    tracks,
+    playbackStatus.isPlaying,
+    playbackStatus.isFinished,
+    handleSelectTrack,
+    handleStartWave,
+  ]);
 
-  const handleSeek = async (seconds: number) => {
+  const handleSeek = useCallback(async (seconds: number) => {
+    isTransitioningRef.current = true;
     try {
       await tauriApi.seekTrack(seconds);
       setPlaybackStatus((prev) => ({ ...prev, positionSec: seconds }));
     } catch (err) {
       console.error('Ошибка перемотки:', err);
+    } finally {
+      setTimeout(() => {
+        isTransitioningRef.current = false;
+      }, 250);
     }
-  };
+  }, []);
 
-  const handleVolumeChange = async (volume: number) => {
+  const handleVolumeChange = useCallback(async (volume: number) => {
     try {
       await tauriApi.setVolume(volume);
       setPlaybackStatus((prev) => ({
@@ -255,33 +510,52 @@ export const App: React.FC = () => {
     } catch (err) {
       console.error('Ошибка громкости:', err);
     }
-  };
+  }, []);
 
-  const handleToggleMute = async () => {
+  const handleToggleMute = useCallback(async () => {
     try {
       const isMuted = await tauriApi.toggleMute();
       setPlaybackStatus((prev) => ({ ...prev, isMuted }));
     } catch (err) {
       console.error('Ошибка mute:', err);
     }
-  };
+  }, []);
 
-  const handleToggleFavorite = async (trackId: string) => {
+  // Мгновенный лайк для локальных и онлайн-треков
+  const handleToggleFavorite = useCallback(async (trackId: string) => {
+    const target = allTracksRef.current.find((t) => t.id === trackId);
+    const nextFav = target ? !target.isFavorite : true;
+
+    const updateList = (list: TrackItem[]) =>
+      list.map((t) => (t.id === trackId ? { ...t, isFavorite: nextFav } : t));
+
+    setTracks(updateList);
+    setOnlineTracks(updateList);
+    setSearchResults(updateList);
+    setCurrentTrack((prev) =>
+      prev && prev.id === trackId ? { ...prev, isFavorite: nextFav } : prev
+    );
+
+    searchCacheRef.current.forEach((cachedList, key) => {
+      searchCacheRef.current.set(key, updateList(cachedList));
+    });
+
+    setSavedOnlineFavs((prev) => {
+      const filtered = prev.filter((t) => t.id !== trackId);
+      const updated =
+        nextFav && target ? [{ ...target, isFavorite: true }, ...filtered] : filtered;
+      try {
+        localStorage.setItem('abyss-online-favs', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
     try {
-      const newFav = await tauriApi.toggleFavorite(trackId);
-      setTracks((prev) =>
-        prev.map((t) => (t.id === trackId ? { ...t, isFavorite: newFav } : t))
-      );
-      setOnlineTracks((prev) =>
-        prev.map((t) => (t.id === trackId ? { ...t, isFavorite: newFav } : t))
-      );
-      if (currentTrack?.id === trackId) {
-        setCurrentTrack((prev) => (prev ? { ...prev, isFavorite: newFav } : null));
-      }
-    } catch (err) {
-      console.error('Ошибка избранного:', err);
+      await tauriApi.toggleFavorite(trackId);
+    } catch {
+      // Онлайн-трек может отсутствовать в SQLite — локальное состояние уже обновлено
     }
-  };
+  }, []);
 
   const handleCreatePlaylist = async () => {
     const index = playlists.length + 1;
@@ -297,25 +571,113 @@ export const App: React.FC = () => {
     }
   };
 
+  // Глобальные горячие клавиши
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      const isTyping = tag === 'INPUT' || tag === 'TEXTAREA';
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setIsCmdOpen((v) => !v);
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        setIsCmdOpen(false);
+        setIsNowPlayingOpen(false);
+        setIsWaveModalOpen(false);
+        setIsThemeModalOpen(false);
+        return;
+      }
+
+      if (isTyping) return;
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        handleTogglePlay();
+      } else if (e.key === 'ArrowRight' && currentTrack) {
+        handleSeek(
+          Math.min(currentTrack.durationSeconds ?? 0, playbackStatus.positionSec + 5)
+        );
+      } else if (e.key === 'ArrowLeft' && currentTrack) {
+        handleSeek(Math.max(0, playbackStatus.positionSec - 5));
+      } else if (e.key.toLowerCase() === 'm') {
+        handleToggleMute();
+      } else if (e.key.toLowerCase() === 'l' && currentTrack) {
+        handleToggleFavorite(currentTrack.id);
+      } else if (e.key.toLowerCase() === 'f' && currentTrack) {
+        setIsNowPlayingOpen((v) => !v);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [
+    currentTrack,
+    playbackStatus.positionSec,
+    handleTogglePlay,
+    handleSeek,
+    handleToggleMute,
+    handleToggleFavorite,
+  ]);
+
   const allAvailableTracks = useMemo(() => {
+    const favIds = new Set(savedOnlineFavs.map((t) => t.id));
     const map = new Map<string, TrackItem>();
-    tracks.forEach((t) => map.set(t.id, t));
+
+    tracks.forEach((t) =>
+      map.set(t.id, favIds.has(t.id) ? { ...t, isFavorite: true } : t)
+    );
     onlineTracks.forEach((t) => {
-      if (!map.has(t.id)) map.set(t.id, t);
+      if (!map.has(t.id)) {
+        map.set(t.id, favIds.has(t.id) ? { ...t, isFavorite: true } : t);
+      }
     });
+    searchResults.forEach((t) => {
+      if (!map.has(t.id)) {
+        map.set(t.id, favIds.has(t.id) ? { ...t, isFavorite: true } : t);
+      }
+    });
+    savedOnlineFavs.forEach((t) => {
+      if (!map.has(t.id)) {
+        map.set(t.id, { ...t, isFavorite: true });
+      }
+    });
+
     return Array.from(map.values());
-  }, [tracks, onlineTracks]);
+  }, [tracks, onlineTracks, searchResults, savedOnlineFavs]);
+
+  useEffect(() => {
+    allTracksRef.current = allAvailableTracks;
+  }, [allAvailableTracks]);
+
+  const isSearching = searchQuery.trim().length > 0;
 
   const displayedTracks = useMemo(() => {
-    if (activeTab === 'search') {
+    const favIds = new Set(savedOnlineFavs.map((t) => t.id));
+    const applyFav = (t: TrackItem) =>
+      favIds.has(t.id) ? { ...t, isFavorite: true } : t;
+
+    if (isSearching) {
       const q = searchQuery.trim().toLowerCase();
-      if (!q) return allAvailableTracks;
-      return allAvailableTracks.filter(
-        (t) =>
+      const map = new Map<string, TrackItem>();
+
+      tracks.forEach((t) => {
+        if (
           t.title.toLowerCase().includes(q) ||
           t.artist.toLowerCase().includes(q) ||
           t.album.toLowerCase().includes(q)
-      );
+        ) {
+          map.set(t.id, applyFav(t));
+        }
+      });
+
+      searchResults.forEach((t) => {
+        if (!map.has(t.id)) map.set(t.id, applyFav(t));
+      });
+
+      return Array.from(map.values());
     }
 
     if (activeTab === 'favorites') {
@@ -328,16 +690,24 @@ export const App: React.FC = () => {
       return allAvailableTracks.filter((t) => pl.trackIds.includes(t.id));
     }
 
-    return onlineTracks.length > 0 ? onlineTracks : tracks;
+    return (onlineTracks.length > 0 ? onlineTracks : tracks).map(applyFav);
   }, [
+    savedOnlineFavs,
+    isSearching,
+    searchQuery,
+    tracks,
+    searchResults,
     activeTab,
     activePlaylistId,
     playlists,
-    searchQuery,
     allAvailableTracks,
     onlineTracks,
-    tracks,
   ]);
+
+  const visibleTracks = useMemo(
+    () => displayedTracks.slice(0, renderLimit),
+    [displayedTracks, renderLimit]
+  );
 
   const activeWaveTags = [
     waveSettings.mood,
@@ -348,15 +718,41 @@ export const App: React.FC = () => {
 
   const activePlaylist = playlists.find((p) => p.id === activePlaylistId) || null;
   const activeQueue = queue.length > 0 ? queue : displayedTracks;
-  const viewKey = `${activeTab}-${activePlaylistId ?? 'root'}`;
+  const viewKey = isSearching ? 'search-view' : `${activeTab}-${activePlaylistId ?? 'root'}`;
+
+  const syncedCurrentTrack = useMemo(() => {
+    if (!currentTrack) return null;
+    const isFav =
+      currentTrack.isFavorite ||
+      savedOnlineFavs.some((t) => t.id === currentTrack.id);
+    return isFav === currentTrack.isFavorite
+      ? currentTrack
+      : { ...currentTrack, isFavorite: isFav };
+  }, [currentTrack, savedOnlineFavs]);
 
   return (
     <div className="app-shell">
-      {/* Динамическая подсветка фона под обложку текущего трека */}
-      {currentTrack?.coverUrl && (
+      <div
+        ref={bloomRef}
+        className="cursor-bloom"
+        aria-hidden="true"
+        style={{
+          position: 'fixed',
+          left: 0,
+          top: 0,
+          width: 140,
+          height: 140,
+          marginLeft: -70,
+          marginTop: -70,
+          zIndex: 40,
+          pointerEvents: 'none',
+        }}
+      />
+
+      {syncedCurrentTrack?.coverUrl && (
         <div
           className="ambient-cover-glow"
-          style={{ backgroundImage: `url(${currentTrack.coverUrl})` }}
+          style={{ backgroundImage: `url(${syncedCurrentTrack.coverUrl})` }}
           aria-hidden="true"
         />
       )}
@@ -366,28 +762,94 @@ export const App: React.FC = () => {
         activePlaylistId={activePlaylistId}
         playlists={playlists}
         onSelectTab={(tab) => {
+          setSearchQuery('');
           setActiveTab(tab);
           if (tab !== 'playlist') {
             setActivePlaylistId(null);
           }
         }}
         onSelectPlaylist={(playlistId) => {
+          setSearchQuery('');
           setActivePlaylistId(playlistId);
           setActiveTab('playlist');
         }}
         onCreatePlaylist={handleCreatePlaylist}
         onScanFolder={handlePickAndScanFolder}
+        onOpenThemes={() => setIsThemeModalOpen(true)}
       />
 
       <main className="main-workspace">
+        <TopSearchBar externalValue={searchQuery} onSearchCommit={setSearchQuery} />
+
         <div key={viewKey} className="view-transition">
-          {activeTab === 'home' && (
+          {isSearching ? (
+            <div>
+              <div className="section-header-row" style={{ marginTop: 4 }}>
+                <h2 className="section-heading shimmer-text">
+                  Результаты: «{searchQuery.trim()}»
+                  {isSearchingApi && (
+                    <span
+                      className="track-artist"
+                      style={{ marginLeft: 12, fontWeight: 500 }}
+                    >
+                      обновляем...
+                    </span>
+                  )}
+                </h2>
+              </div>
+
+              {visibleTracks.length > 0 ? (
+                <div
+                  style={{
+                    opacity: isSearchingApi ? 0.65 : 1,
+                    transition: 'opacity 0.2s ease',
+                  }}
+                >
+                  <TrackList
+                    tracks={visibleTracks}
+                    currentTrackId={syncedCurrentTrack?.id ?? null}
+                    isPlaying={playbackStatus.isPlaying}
+                    onSelectTrack={(track) => handleSelectTrack(track, displayedTracks)}
+                    onToggleFavorite={handleToggleFavorite}
+                  />
+                  {displayedTracks.length > renderLimit && (
+                    <div style={{ display: 'flex', justifyContent: 'center', marginTop: 20 }}>
+                      <button
+                        type="button"
+                        className="wave-settings-btn"
+                        onClick={() => setRenderLimit((l) => l + 40)}
+                      >
+                        Показать ещё ({displayedTracks.length - renderLimit})
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : isSearchingApi ? (
+                <div style={{ marginTop: 20 }} className="empty-box">
+                  <Search size={32} className="pulse-icon" />
+                  <div className="track-name" style={{ fontSize: 16 }}>
+                    Ищем треки в сети...
+                  </div>
+                </div>
+              ) : (
+                <div style={{ marginTop: 20 }} className="empty-box">
+                  <Search size={32} />
+                  <div className="track-name" style={{ fontSize: 16 }}>
+                    Ничего не найдено
+                  </div>
+                  <p className="track-artist" style={{ maxWidth: 380 }}>
+                    Попробуй другой запрос или проверь локальную медиатеку
+                  </p>
+                </div>
+              )}
+            </div>
+          ) : activeTab === 'home' ? (
             <>
               <section className="wave-hero">
                 <svg className="wave-hero-bg-lines" viewBox="0 0 340 240" fill="none">
                   <path
                     d="M-20 190 C 80 110, 170 250, 360 120"
-                    stroke="rgba(255,255,255,0.08)"
+                    stroke="rgba(255,255,255,0.09)"
                     strokeWidth="1.5"
                   />
                   <path
@@ -398,7 +860,7 @@ export const App: React.FC = () => {
                 </svg>
 
                 <div className="wave-hero-content">
-                  <h1 className="wave-hero-title">Моя волна</h1>
+                  <h1 className="wave-hero-title shimmer-text">Моя волна</h1>
                   <p className="wave-hero-subtitle">
                     Бесконечный персональный поток под твоё настроение
                   </p>
@@ -466,11 +928,11 @@ export const App: React.FC = () => {
               {!isLoadingStream && displayedTracks.length > 0 && (
                 <>
                   <div className="section-header-row">
-                    <h2 className="section-heading">Недавно добавлено</h2>
+                    <h2 className="section-heading shimmer-text">Недавно добавлено</h2>
                   </div>
                   <div className="recent-grid">
                     {displayedTracks.slice(0, 6).map((track, idx) => {
-                      const isCurrent = currentTrack?.id === track.id;
+                      const isCurrent = syncedCurrentTrack?.id === track.id;
                       return (
                         <button
                           key={track.id}
@@ -484,6 +946,8 @@ export const App: React.FC = () => {
                               src={track.coverUrl}
                               alt={track.title}
                               className="recent-thumb"
+                              loading="lazy"
+                              decoding="async"
                             />
                           ) : (
                             <div className="recent-thumb">
@@ -491,7 +955,9 @@ export const App: React.FC = () => {
                             </div>
                           )}
                           <div className="recent-card-text">
-                            <span className="recent-card-title">{track.title}</span>
+                            <span className="recent-card-title shimmer-text">
+                              {track.title}
+                            </span>
                             <span className="recent-card-artist">{track.artist}</span>
                           </div>
                         </button>
@@ -500,77 +966,34 @@ export const App: React.FC = () => {
                   </div>
 
                   <div className="section-header-row">
-                    <h2 className="section-heading">
+                    <h2 className="section-heading shimmer-text">
                       {onlineTracks.length > 0
                         ? `Поток «Моей волны» (${displayedTracks.length})`
                         : `Коллекция треков (${tracks.length})`}
                     </h2>
                   </div>
                   <TrackList
-                    tracks={displayedTracks}
-                    currentTrackId={currentTrack?.id ?? null}
+                    tracks={visibleTracks}
+                    currentTrackId={syncedCurrentTrack?.id ?? null}
                     isPlaying={playbackStatus.isPlaying}
                     onSelectTrack={(track) => handleSelectTrack(track, displayedTracks)}
                     onToggleFavorite={handleToggleFavorite}
                   />
+                  {displayedTracks.length > renderLimit && (
+                    <div style={{ display: 'flex', justifyContent: 'center', marginTop: 20 }}>
+                      <button
+                        type="button"
+                        className="wave-settings-btn"
+                        onClick={() => setRenderLimit((l) => l + 40)}
+                      >
+                        Показать ещё ({displayedTracks.length - renderLimit})
+                      </button>
+                    </div>
+                  )}
                 </>
               )}
             </>
-          )}
-
-          {activeTab === 'search' && (
-            <div>
-              <div className="search-bar-wrap">
-                <Search size={17} className="search-input-icon" />
-                <input
-                  type="text"
-                  className="search-input"
-                  placeholder="Поиск треков, исполнителей или жанров (Audius + Abyss API)..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  autoFocus
-                />
-                {searchQuery && (
-                  <button
-                    className="icon-ghost-btn search-clear-btn"
-                    onClick={() => setSearchQuery('')}
-                    title="Очистить"
-                  >
-                    <X size={16} />
-                  </button>
-                )}
-              </div>
-
-              {isLoadingStream ? (
-                <div style={{ marginTop: 28 }} className="empty-box">
-                  <Search size={32} className="pulse-icon" />
-                  <div className="track-name" style={{ fontSize: 16 }}>
-                    Ищем треки в сети...
-                  </div>
-                </div>
-              ) : displayedTracks.length > 0 ? (
-                <TrackList
-                  tracks={displayedTracks}
-                  currentTrackId={currentTrack?.id ?? null}
-                  isPlaying={playbackStatus.isPlaying}
-                  onSelectTrack={(track) => handleSelectTrack(track, displayedTracks)}
-                  onToggleFavorite={handleToggleFavorite}
-                />
-              ) : (
-                <div style={{ marginTop: 28 }} className="empty-box">
-                  <Search size={32} />
-                  <div className="track-name" style={{ fontSize: 16 }}>
-                    Ничего не найдено
-                  </div>
-                  <p className="track-artist" style={{ maxWidth: 380 }}>
-                    Введи название трека или исполнителя для поиска по Audius и локальной базе
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {activeTab === 'favorites' && (
+          ) : activeTab === 'favorites' ? (
             <div>
               <div className="collection-banner">
                 <div className="collection-big-cover">
@@ -578,17 +1001,17 @@ export const App: React.FC = () => {
                 </div>
                 <div>
                   <div className="collection-banner-label">Плейлист</div>
-                  <h1 className="collection-banner-title">Мне нравится</h1>
+                  <h1 className="collection-banner-title shimmer-text">Мне нравится</h1>
                   <p className="collection-banner-meta">
                     Треков: {displayedTracks.length}
                   </p>
                 </div>
               </div>
 
-              {displayedTracks.length > 0 ? (
+              {visibleTracks.length > 0 ? (
                 <TrackList
-                  tracks={displayedTracks}
-                  currentTrackId={currentTrack?.id ?? null}
+                  tracks={visibleTracks}
+                  currentTrackId={syncedCurrentTrack?.id ?? null}
                   isPlaying={playbackStatus.isPlaying}
                   onSelectTrack={(track) => handleSelectTrack(track, displayedTracks)}
                   onToggleFavorite={handleToggleFavorite}
@@ -605,9 +1028,7 @@ export const App: React.FC = () => {
                 </div>
               )}
             </div>
-          )}
-
-          {activeTab === 'playlist' && activePlaylist && (
+          ) : activeTab === 'playlist' && activePlaylist ? (
             <div>
               <div className="collection-banner">
                 <div className="collection-big-cover">
@@ -615,17 +1036,19 @@ export const App: React.FC = () => {
                 </div>
                 <div>
                   <div className="collection-banner-label">Плейлист</div>
-                  <h1 className="collection-banner-title">{activePlaylist.name}</h1>
+                  <h1 className="collection-banner-title shimmer-text">
+                    {activePlaylist.name}
+                  </h1>
                   <p className="collection-banner-meta">
                     Треков: {displayedTracks.length}
                   </p>
                 </div>
               </div>
 
-              {displayedTracks.length > 0 ? (
+              {visibleTracks.length > 0 ? (
                 <TrackList
-                  tracks={displayedTracks}
-                  currentTrackId={currentTrack?.id ?? null}
+                  tracks={visibleTracks}
+                  currentTrackId={syncedCurrentTrack?.id ?? null}
                   isPlaying={playbackStatus.isPlaying}
                   onSelectTrack={(track) => handleSelectTrack(track, displayedTracks)}
                   onToggleFavorite={handleToggleFavorite}
@@ -642,14 +1065,14 @@ export const App: React.FC = () => {
                 </div>
               )}
             </div>
-          )}
+          ) : null}
         </div>
       </main>
 
       {isQueueOpen && (
         <aside className="queue-drawer">
           <div className="queue-header">
-            <span className="section-heading" style={{ fontSize: 17 }}>
+            <span className="section-heading shimmer-text" style={{ fontSize: 17 }}>
               Очередь
             </span>
             <button
@@ -661,12 +1084,12 @@ export const App: React.FC = () => {
             </button>
           </div>
 
-          {currentTrack && (
+          {syncedCurrentTrack && (
             <div className="queue-now-card">
-              {currentTrack.coverUrl ? (
+              {syncedCurrentTrack.coverUrl ? (
                 <img
-                  src={currentTrack.coverUrl}
-                  alt={currentTrack.title}
+                  src={syncedCurrentTrack.coverUrl}
+                  alt={syncedCurrentTrack.title}
                   className="queue-big-art"
                 />
               ) : (
@@ -674,10 +1097,10 @@ export const App: React.FC = () => {
                   <Music size={36} />
                 </div>
               )}
-              <div className="track-name" style={{ fontSize: 16 }}>
-                {currentTrack.title}
+              <div className="track-name shimmer-text" style={{ fontSize: 16 }}>
+                {syncedCurrentTrack.title}
               </div>
-              <div className="track-artist">{currentTrack.artist}</div>
+              <div className="track-artist">{syncedCurrentTrack.artist}</div>
             </div>
           )}
 
@@ -685,8 +1108,8 @@ export const App: React.FC = () => {
             Далее в очереди ({activeQueue.length})
           </div>
           <div className="queue-scroll">
-            {activeQueue.map((track) => {
-              const isCurrent = currentTrack?.id === track.id;
+            {activeQueue.slice(0, 50).map((track) => {
+              const isCurrent = syncedCurrentTrack?.id === track.id;
               return (
                 <button
                   key={track.id}
@@ -699,6 +1122,8 @@ export const App: React.FC = () => {
                       src={track.coverUrl}
                       alt={track.title}
                       className="track-mini-cover"
+                      loading="lazy"
+                      decoding="async"
                     />
                   ) : (
                     <div className="track-mini-cover">
@@ -706,7 +1131,7 @@ export const App: React.FC = () => {
                     </div>
                   )}
                   <div className="recent-card-text">
-                    <span className="track-name" style={{ fontSize: 13 }}>
+                    <span className="track-name shimmer-text" style={{ fontSize: 13 }}>
                       {track.title}
                     </span>
                     <span className="track-artist">{track.artist}</span>
@@ -719,7 +1144,7 @@ export const App: React.FC = () => {
       )}
 
       <PlayerBar
-        currentTrack={currentTrack}
+        currentTrack={syncedCurrentTrack}
         isPlaying={playbackStatus.isPlaying}
         isShuffle={isShuffle}
         isRepeat={isRepeat}
@@ -736,7 +1161,8 @@ export const App: React.FC = () => {
         onSeek={handleSeek}
         onVolumeChange={handleVolumeChange}
         onToggleMute={handleToggleMute}
-        onToggleFavorite={() => currentTrack && handleToggleFavorite(currentTrack.id)}
+        onToggleFavorite={handleToggleFavorite}
+        onOpenNowPlaying={() => syncedCurrentTrack && setIsNowPlayingOpen(true)}
       />
 
       {isWaveModalOpen && (
@@ -751,6 +1177,38 @@ export const App: React.FC = () => {
           }}
         />
       )}
+
+      <ThemeModal
+        isOpen={isThemeModalOpen}
+        currentThemeId={currentThemeId}
+        onSelectTheme={(theme: ThemePreset) => setCurrentThemeId(theme.id)}
+        onClose={() => setIsThemeModalOpen(false)}
+      />
+
+      <NowPlayingOverlay
+        isOpen={isNowPlayingOpen}
+        track={syncedCurrentTrack}
+        isPlaying={playbackStatus.isPlaying}
+        positionSec={playbackStatus.positionSec}
+        onClose={() => setIsNowPlayingOpen(false)}
+        onTogglePlay={handleTogglePlay}
+        onPrev={handlePrevTrack}
+        onNext={handleNextTrack}
+        onSeek={handleSeek}
+        onToggleFavorite={handleToggleFavorite}
+      />
+
+      <CommandPalette
+        isOpen={isCmdOpen}
+        tracks={allAvailableTracks}
+        onClose={() => setIsCmdOpen(false)}
+        onSelectTrack={(track) => handleSelectTrack(track, allAvailableTracks)}
+        onStartWave={() => handleStartWave()}
+        onNavigate={(tab) => {
+          setSearchQuery('');
+          setActiveTab(tab);
+        }}
+      />
     </div>
   );
 };

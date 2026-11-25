@@ -1,5 +1,5 @@
 import React from 'react';
-import { Home, Search, Heart, FolderPlus, Plus, Music } from 'lucide-react';
+import { Home, Heart, Palette, Plus, FolderPlus, Music } from 'lucide-react';
 import { PlaylistItem, getCoverGradient } from '../shared/models';
 
 export type NavTab = 'home' | 'search' | 'favorites' | 'playlist';
@@ -12,6 +12,7 @@ interface SidebarProps {
   onSelectPlaylist: (playlistId: string) => void;
   onCreatePlaylist: () => void;
   onScanFolder: () => void;
+  onOpenThemes: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -22,12 +23,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectPlaylist,
   onCreatePlaylist,
   onScanFolder,
+  onOpenThemes,
 }) => {
   return (
     <aside className="sidebar">
-      <div className="brand-block">
-        <span className="brand-title">Abyss</span>
-        <span className="brand-subtitle">music</span>
+      <div className="brand-block" onClick={() => onSelectTab('home')} style={{ cursor: 'pointer' }}>
+        <div className="brand-title">ABYSS</div>
+        <div className="brand-subtitle">MUSIC</div>
       </div>
 
       <nav className="nav-list">
@@ -37,20 +39,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
           onClick={() => onSelectTab('home')}
         >
           <span className="nav-pill-icon">
-            <Home size={18} strokeWidth={activeTab === 'home' ? 2.4 : 1.9} />
+            <Home size={16} />
           </span>
           <span>Главная</span>
-        </button>
-
-        <button
-          type="button"
-          className={`nav-pill ${activeTab === 'search' ? 'active' : ''}`}
-          onClick={() => onSelectTab('search')}
-        >
-          <span className="nav-pill-icon">
-            <Search size={18} strokeWidth={activeTab === 'search' ? 2.4 : 1.9} />
-          </span>
-          <span>Поиск</span>
         </button>
 
         <button
@@ -59,13 +50,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
           onClick={() => onSelectTab('favorites')}
         >
           <span className="nav-pill-icon">
-            <Heart
-              size={18}
-              strokeWidth={activeTab === 'favorites' ? 2.4 : 1.9}
-              fill={activeTab === 'favorites' ? 'currentColor' : 'none'}
-            />
+            <Heart size={16} />
           </span>
-          <span>Избранное</span>
+          <span>Мне нравится</span>
+        </button>
+
+        <button type="button" className="nav-pill" onClick={onOpenThemes}>
+          <span className="nav-pill-icon">
+            <Palette size={16} />
+          </span>
+          <span>Темы</span>
         </button>
       </nav>
 
@@ -76,40 +70,39 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <button
               type="button"
               className="icon-ghost-btn"
-              title="Добавить папку с музыкой"
               onClick={onScanFolder}
+              title="Добавить папку с музыкой"
             >
-              <FolderPlus size={18} />
+              <FolderPlus size={16} />
             </button>
             <button
               type="button"
               className="icon-ghost-btn"
-              title="Создать плейлист"
               onClick={onCreatePlaylist}
+              title="Создать плейлист"
             >
-              <Plus size={19} />
+              <Plus size={17} />
             </button>
           </div>
         </div>
 
         <div className="playlist-scroll">
-          {playlists.map((playlist) => {
-            const isActive =
-              activeTab === 'playlist' && activePlaylistId === playlist.id;
+          {playlists.map((pl) => {
+            const isActive = activeTab === 'playlist' && activePlaylistId === pl.id;
             return (
               <button
-                key={playlist.id}
+                key={pl.id}
                 type="button"
                 className={`playlist-row ${isActive ? 'active' : ''}`}
-                onClick={() => onSelectPlaylist(playlist.id)}
+                onClick={() => onSelectPlaylist(pl.id)}
               >
                 <div
                   className="playlist-cover-stub"
-                  style={{ background: getCoverGradient(playlist.id) }}
+                  style={{ background: getCoverGradient(pl.id) }}
                 >
-                  <Music size={17} />
+                  <Music size={16} />
                 </div>
-                <span className="recent-card-title">{playlist.name}</span>
+                <span className="recent-card-title shimmer-text">{pl.name}</span>
               </button>
             );
           })}

@@ -130,6 +130,7 @@ interface PlayerBarProps {
   onSeek: (sec: number) => void;
   onVolumeChange: (val: number) => void;
   onToggleFavorite: (trackId: string) => void;
+  onOpenNowPlaying?: () => void;
 }
 
 export const PlayerBar: React.FC<PlayerBarProps> = ({
@@ -151,6 +152,7 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
   onSeek,
   onVolumeChange,
   onToggleFavorite,
+  onOpenNowPlaying,
 }) => {
   const [previewSec, setPreviewSec] = useState<number | null>(null);
 
@@ -161,46 +163,59 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
   return (
     <footer className="player-dock">
       <div className="player-track-info">
-        {currentTrack?.coverUrl ? (
-          <img
-            src={currentTrack.coverUrl}
-            alt={currentTrack.title}
-            className="track-mini-cover"
-          />
-        ) : (
-          <div
-            className="track-mini-cover"
-            style={{
-              background: currentTrack
-                ? getCoverGradient(currentTrack.id)
-                : 'rgba(255,255,255,0.12)',
-            }}
-          >
-            <Music size={17} />
-          </div>
-        )}
+        <div
+          onClick={onOpenNowPlaying}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            minWidth: 0,
+            cursor: currentTrack ? 'pointer' : 'default',
+          }}
+          title={currentTrack ? 'Открыть на весь экран (F)' : undefined}
+        >
+          {currentTrack?.coverUrl ? (
+            <img
+              src={currentTrack.coverUrl}
+              alt={currentTrack.title}
+              className="track-mini-cover"
+            />
+          ) : (
+            <div
+              className="track-mini-cover"
+              style={{
+                background: currentTrack
+                  ? getCoverGradient(currentTrack.id)
+                  : 'rgba(255,255,255,0.12)',
+              }}
+            >
+              <Music size={17} />
+            </div>
+          )}
 
-        {currentTrack ? (
-          <>
+          {currentTrack ? (
             <div style={{ minWidth: 0 }}>
               <div className="track-name recent-card-title">{currentTrack.title}</div>
               <div className="track-artist recent-card-title">{currentTrack.artist}</div>
             </div>
-            <button
-              type="button"
-              className="icon-ghost-btn"
-              onClick={() => onToggleFavorite(currentTrack.id)}
-              title={currentTrack.isFavorite ? 'Убрать из избранного' : 'В избранное'}
-            >
-              <Heart
-                size={16}
-                fill={currentTrack.isFavorite ? '#ffffff' : 'none'}
-                color="#ffffff"
-              />
-            </button>
-          </>
-        ) : (
-          <div className="track-artist">Трек не выбран</div>
+          ) : (
+            <div className="track-artist">Трек не выбран</div>
+          )}
+        </div>
+
+        {currentTrack && (
+          <button
+            type="button"
+            className="icon-ghost-btn"
+            onClick={() => onToggleFavorite(currentTrack.id)}
+            title={currentTrack.isFavorite ? 'Убрать из избранного' : 'В избранное'}
+          >
+            <Heart
+              size={16}
+              fill={currentTrack.isFavorite ? '#ffffff' : 'none'}
+              color="#ffffff"
+            />
+          </button>
         )}
       </div>
 
