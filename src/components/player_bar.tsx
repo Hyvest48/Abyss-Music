@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { TrackItem, getCoverGradient } from '../shared/models';
 import { formatDuration } from './track_list';
+import { ArtistLinks } from './artist_links';
 
 interface SmoothSliderProps {
   value: number;
@@ -135,6 +136,7 @@ interface PlayerBarProps {
   onSeek: (sec: number) => void;
   onVolumeChange: (val: number) => void;
   onToggleFavorite: (trackId: string) => void;
+  onSelectArtist?: (artist: string) => void;
   onOpenNowPlaying?: () => void;
 }
 
@@ -160,6 +162,7 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
   onSeek,
   onVolumeChange,
   onToggleFavorite,
+  onSelectArtist,
   onOpenNowPlaying,
 }) => {
   const [previewSec, setPreviewSec] = useState<number | null>(null);
@@ -204,7 +207,9 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
           {currentTrack ? (
             <div style={{ minWidth: 0 }}>
               <div className="track-name recent-card-title">{currentTrack.title}</div>
-              <div className="track-artist recent-card-title">{currentTrack.artist}</div>
+              <div className="track-artist recent-card-title">
+                <ArtistLinks artist={currentTrack.artist} onSelectArtist={onSelectArtist} />
+              </div>
             </div>
           ) : (
             <div className="track-artist">Трек не выбран</div>

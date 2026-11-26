@@ -9,9 +9,13 @@ import {
   Music,
   MicVocal,
   Sliders,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 import { TrackItem, getCoverGradient } from '../shared/models';
 import { formatDuration } from './track_list';
+import { SmoothSlider } from './smooth_slider';
+import { ArtistLinks } from './artist_links';
 import { tauriApi, TrackLyrics } from '../services/tauri_api';
 
 const lyricsCache = new Map<string, TrackLyrics>();
@@ -26,13 +30,18 @@ interface NowPlayingOverlayProps {
   track: TrackItem | null;
   isPlaying: boolean;
   positionSec: number;
+  volume: number;
+  isMuted: boolean;
   audioLevel?: number;
   onClose: () => void;
   onTogglePlay: () => void;
   onPrev: () => void;
   onNext: () => void;
   onSeek: (sec: number) => void;
+  onVolumeChange: (vol: number) => void;
+  onToggleMute: () => void;
   onToggleFavorite: (trackId: string) => void;
+  onSelectArtist?: (artist: string) => void;
   onOpenEq: () => void;
 }
 
@@ -58,19 +67,25 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
   track,
   isPlaying,
   positionSec,
+  volume,
+  isMuted,
   audioLevel = 0,
   onClose,
   onTogglePlay,
   onPrev,
   onNext,
   onSeek,
+  onVolumeChange,
+  onToggleMute,
   onToggleFavorite,
+  onSelectArtist,
   onOpenEq,
 }) => {
   const [syncedLyrics, setSyncedLyrics] = useState<LyricLine[]>([]);
   const [plainLyrics, setPlainLyrics] = useState<string | null>(null);
   const [isInstrumental, setIsInstrumental] = useState(false);
   const [isLoadingLyrics, setIsLoadingLyrics] = useState(false);
+  const [previewSec, setPreviewSec] = useState<number | null>(null);
   const activeLineRef = useRef<HTMLButtonElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const audioLevelRef = useRef(audioLevel);
@@ -107,7 +122,9 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
       setIsInstrumental(false);
       try {
         const data = await tauriApi.getTrackLyrics(track);
-        lyricsCache.set(track.id, data);
+        if (data.syncedLyrics || data.plainLyrics || data.instrumental) {
+          lyricsCache.set(track.id, data);
+        }
         if (cancelled) return;
         applyLyrics(data);
       } catch {
@@ -244,7 +261,13 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
           <div className="now-playing-meta">
             <div>
               <h2 className="now-playing-title">{track.title}</h2>
-              <p className="now-playing-artist">{track.artist}</p>
+              <p className="now-playing-artist">
+                <ArtistLinks
+                  artist={track.artist}
+                  onSelectArtist={onSelectArtist}
+                  onAfterClick={onClose}
+                />
+              </p>
             </div>
             <button
               className="icon-ghost-btn"
@@ -275,8 +298,54 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
             </button>
           </div>
 
-          <div className="tabular-time" style={{ textAlign: 'center', marginTop: 10 }}>
-            {formatDuration(Math.floor(positionSec))} / {formatDuration(duration)}
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              width: '100%',
+              marginTop: 14,
+            }}
+          >
+            <span className="tabular-time" style={{ fontSize: 12, minWidth: 34 }}>
+              {formatDuration(Math.floor(previewSec ?? positionSec))}
+            </span>
+            <SmoothSlider
+              value={positionSec}
+              max={duration}
+              commitOnRelease={true}
+              onDragPreview={setPreviewSec}
+              onChange={(val) => onSeek(Math.floor(val))}
+              disabled={!track || duration <= 0}
+            />
+            <span className="tabular-time" style={{ fontSize: 12, minWidth: 34, textAlign: 'right' }}>
+              {formatDuration(duration)}
+            </span>
+          </div>
+
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              width: '100%',
+              marginTop: 10,
+            }}
+          >
+            <button
+              type="button"
+              className="icon-ghost-btn"
+              style={{ width: 28, height: 28, flexShrink: 0 }}
+              onClick={onToggleMute}
+              title={isMuted ? 'Включить звук' : 'Выключить звук'}
+            >
+              {isMuted || volume <= 0.01 ? <VolumeX size={16} /> : <Volume2 size={16} />}
+            </button>
+            <SmoothSlider
+              value={isMuted ? 0 : volume}
+              max={1}
+              onChange={(val) => onVolumeChange(Number(val.toFixed(2)))}
+            />
           </div>
         </div>
 

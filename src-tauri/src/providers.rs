@@ -35,6 +35,22 @@ pub struct SimilarArtist {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SearchArtistItem {
+    pub id: String,
+    pub name: String,
+    pub cover_url: Option<String>,
+    pub tracks_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YandexSearchResult {
+    pub artists: Vec<SearchArtistItem>,
+    pub tracks: Vec<TrackItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ArtistProfile {
     pub id: String,
     pub name: String,
@@ -43,6 +59,7 @@ pub struct ArtistProfile {
     pub tracks_count: u64,
     pub albums_count: u64,
     pub likes_count: u64,
+    pub monthly_listeners: u64,
     pub popular_tracks: Vec<TrackItem>,
     pub all_tracks: Vec<TrackItem>,
     pub albums: Vec<ArtistAlbum>,
@@ -256,8 +273,62 @@ pub fn search_yandex(token: &str, query: &str) -> Result<Vec<TrackItem>, String>
     Ok(tracks)
 }
 
+pub fn search_yandex_all(token: &str, query: &str) -> Result<YandexSearchResult, String> {
+    if query.trim().is_empty() {
+        return Ok(YandexSearchResult {
+            artists: Vec::new(),
+            tracks: Vec::new(),
+        });
+    }
+    let client = ym_client(token)?;
+    let url = format!("{}/search", YM_API);
+    let resp: Value = client
+        .get(&url)
+        .query(&[("text", query), ("type", "all"), ("page", "0")])
+        .send()
+        .map_err(|e| e.to_string())?
+        .json()
+        .map_err(|e| e.to_string())?;
+
+    let artists = resp
+        .pointer("/result/artists/results")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| {
+                    let id = a.get("id")?.to_string().trim_matches('"').to_string();
+                    let name = a.get("name")?.as_str()?.to_string();
+                    let cover_url = parse_ym_cover(a, "300x300");
+                    let tracks_count = a
+                        .pointer("/counts/tracks")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    Some(SearchArtistItem {
+                        id,
+                        name,
+                        cover_url,
+                        tracks_count,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let tracks = resp
+        .pointer("/result/tracks/results")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(parse_ym_track).collect())
+        .unwrap_or_default();
+
+    Ok(YandexSearchResult { artists, tracks })
+}
+
 /// Полная карточка артиста: инфо, популярные треки, все треки (до 100), альбомы/синглы, похожие артисты
-pub fn get_artist_profile(token: &str, artist_name: &str) -> Result<ArtistProfile, String> {
+pub fn get_artist_profile(
+    token: &str,
+    artist_name: &str,
+    known_artist_id: Option<&str>,
+) -> Result<ArtistProfile, String> {
     let clean_name = artist_name.split(',').next().unwrap_or(artist_name).trim();
     if clean_name.is_empty() {
         return Err("Имя артиста не указано".to_string());
@@ -265,49 +336,81 @@ pub fn get_artist_profile(token: &str, artist_name: &str) -> Result<ArtistProfil
 
     let client = ym_client(token)?;
 
-    // 1. Находим artist_id по имени через /search?type=artist
-    let search_url = format!("{}/search", YM_API);
-    let search_resp: Value = client
-        .get(&search_url)
-        .query(&[("text", clean_name), ("type", "artist"), ("page", "0")])
-        .send()
-        .map_err(|e| e.to_string())?
-        .json()
-        .map_err(|e| e.to_string())?;
+    let (artist_id, matched_artist_fallback): (String, Option<Value>) =
+        if let Some(kid) = known_artist_id.filter(|s| !s.trim().is_empty()) {
+            (kid.trim().to_string(), None)
+        } else {
+            let search_url = format!("{}/search", YM_API);
+            let search_resp: Value = client
+                .get(&search_url)
+                .query(&[("text", clean_name), ("type", "artist"), ("page", "0")])
+                .send()
+                .map_err(|e| e.to_string())?
+                .json()
+                .map_err(|e| e.to_string())?;
 
-    let artists_arr = search_resp
-        .pointer("/result/artists/results")
-        .and_then(|v| v.as_array())
-        .ok_or("Артист не найден в Яндекс Музыке")?;
+            let artists_arr = search_resp
+                .pointer("/result/artists/results")
+                .and_then(|v| v.as_array())
+                .ok_or("Артист не найден в Яндекс Музыке")?;
 
-    let matched_artist = artists_arr
-        .iter()
-        .find(|a| {
-            a.get("name")
-                .and_then(|n| n.as_str())
-                .map(|n| n.eq_ignore_ascii_case(clean_name))
-                .unwrap_or(false)
-        })
-        .or_else(|| artists_arr.first())
-        .ok_or("Артист не найден в Яндекс Музыке")?;
+            let matched_artist = artists_arr
+                .iter()
+                .find(|a| {
+                    a.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|n| n.eq_ignore_ascii_case(clean_name))
+                        .unwrap_or(false)
+                })
+                .or_else(|| artists_arr.first())
+                .ok_or("Артист не найден в Яндекс Музыке")?;
 
-    let artist_id = matched_artist
-        .get("id")
-        .ok_or("Не найден ID артиста")?
-        .to_string()
-        .trim_matches('"')
-        .to_string();
+            let aid = matched_artist
+                .get("id")
+                .ok_or("Не найден ID артиста")?
+                .to_string()
+                .trim_matches('"')
+                .to_string();
+            (aid, Some(matched_artist.clone()))
+        };
 
-    // 2. Загружаем brief-info (шапка, популярные треки, альбомы, похожие артисты)
+    // Загружаем brief-info и все треки артиста ПАРАЛЛЕЛЬНО для максимальной скорости
     let brief_url = format!("{}/artists/{}/brief-info", YM_API, artist_id);
-    let brief_resp: Value = client
-        .get(&brief_url)
-        .send()
-        .map_err(|e| e.to_string())?
-        .json()
-        .map_err(|e| e.to_string())?;
+    let all_tracks_url = format!("{}/artists/{}/tracks", YM_API, artist_id);
 
-    let artist_obj = brief_resp.pointer("/result/artist").unwrap_or(matched_artist);
+    let (brief_res, tracks_res) = std::thread::scope(|s| {
+        let brief_handle = s.spawn(|| -> Result<Value, String> {
+            client
+                .get(&brief_url)
+                .send()
+                .map_err(|e| e.to_string())?
+                .json::<Value>()
+                .map_err(|e| e.to_string())
+        });
+        let tracks_handle = s.spawn(|| -> Vec<TrackItem> {
+            client
+                .get(&all_tracks_url)
+                .query(&[("page", "0"), ("page-size", "100")])
+                .send()
+                .ok()
+                .and_then(|r| r.json::<Value>().ok())
+                .and_then(|val| {
+                    val.pointer("/result/tracks")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(parse_ym_track).collect())
+                })
+                .unwrap_or_default()
+        });
+
+        let b = brief_handle.join().unwrap_or_else(|_| Err("Ошибка потока brief-info".to_string()));
+        let t = tracks_handle.join().unwrap_or_default();
+        (b, t)
+    });
+
+    let brief_resp = brief_res?;
+
+    let fallback_val = matched_artist_fallback.unwrap_or(Value::Null);
+    let artist_obj = brief_resp.pointer("/result/artist").unwrap_or(&fallback_val);
     let name = artist_obj
         .get("name")
         .and_then(|v| v.as_str())
@@ -335,6 +438,12 @@ pub fn get_artist_profile(token: &str, artist_name: &str) -> Result<ArtistProfil
         .unwrap_or(0);
     let likes_count = artist_obj
         .get("likesCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let monthly_listeners = brief_resp
+        .pointer("/result/stats/lastMonthListeners")
+        .or_else(|| artist_obj.pointer("/stats/lastMonthListeners"))
+        .or_else(|| brief_resp.pointer("/result/artist/stats/lastMonthListeners"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
@@ -383,21 +492,7 @@ pub fn get_artist_profile(token: &str, artist_name: &str) -> Result<ArtistProfil
         })
         .unwrap_or_default();
 
-    // 3. Загружаем полный каталог треков артиста (/artists/{id}/tracks?page=0&page-size=100)
-    let all_tracks_url = format!("{}/artists/{}/tracks", YM_API, artist_id);
-    let mut all_tracks: Vec<TrackItem> = client
-        .get(&all_tracks_url)
-        .query(&[("page", "0"), ("page-size", "100")])
-        .send()
-        .ok()
-        .and_then(|r| r.json::<Value>().ok())
-        .and_then(|val| {
-            val.pointer("/result/tracks")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(parse_ym_track).collect())
-        })
-        .unwrap_or_default();
-
+    let mut all_tracks = tracks_res;
     if all_tracks.is_empty() {
         all_tracks = popular_tracks.clone();
     }
@@ -420,6 +515,7 @@ pub fn get_artist_profile(token: &str, artist_name: &str) -> Result<ArtistProfil
             albums.len() as u64
         },
         likes_count,
+        monthly_listeners,
         popular_tracks,
         all_tracks,
         albums,
@@ -813,12 +909,38 @@ fn strip_html_tags(html: &str) -> String {
         .replace("&nbsp;", " ")
 }
 
+fn clean_title_for_search(title: &str) -> String {
+    let mut result = title.to_string();
+    for (open, close) in [('(', ')'), ('[', ']')] {
+        while let Some(start) = result.find(open) {
+            if let Some(end_rel) = result[start..].find(close) {
+                let inner = result[start + 1..start + end_rel].to_lowercase();
+                if inner.contains("feat")
+                    || inner.contains("ft.")
+                    || inner.contains("prod")
+                    || inner.contains("remix")
+                    || inner.contains("explicit")
+                {
+                    result.replace_range(start..=start + end_rel, "");
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+    result.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn fetch_genius_lyrics(client: &reqwest::blocking::Client, artist: &str, title: &str) -> Option<String> {
-    let q = format!("{} {}", artist, title);
+    let clean_title = clean_title_for_search(title);
+    let q = format!("{} {}", artist, clean_title);
     let resp = client
         .get("https://genius.com/api/search/multi")
         .query(&[("q", q.as_str())])
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+        .header("Accept", "application/json")
         .send()
         .ok()?;
     if !resp.status().is_success() {
@@ -831,52 +953,71 @@ fn fetch_genius_lyrics(client: &reqwest::blocking::Client, artist: &str, title: 
         .find(|s| s.get("type").and_then(|t| t.as_str()) == Some("song"))
         .and_then(|s| s.get("hits")?.as_array())
         .and_then(|hits| hits.first())
-        .and_then(|hit| hit.get("result")?.get("url")?.as_str())?;
+        .and_then(|hit| hit.get("result")?.get("url")?.as_str())
+        .or_else(|| {
+            sections
+                .iter()
+                .find(|s| s.get("type").and_then(|t| t.as_str()) == Some("top_hit"))
+                .and_then(|s| s.get("hits")?.as_array())
+                .and_then(|hits| {
+                    hits.iter().find(|h| h.get("type").and_then(|t| t.as_str()) == Some("song"))
+                })
+                .and_then(|hit| hit.get("result")?.get("url")?.as_str())
+        })?;
 
     let page_html = client
         .get(song_url)
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
         .send()
         .ok()?
         .text()
         .ok()?;
 
     let mut collected = String::new();
-    let marker = "data-lyrics-container=\"true\"";
     let mut rest = page_html.as_str();
-    while let Some(pos) = rest.find(marker) {
-        let after_marker = &rest[pos + marker.len()..];
-        if let Some(gt_pos) = after_marker.find('>') {
-            let content_start = &after_marker[gt_pos + 1..];
-            let mut depth = 1_i32;
-            let mut idx = 0;
-            let bytes = content_start.as_bytes();
-            while idx < bytes.len() && depth > 0 {
-                if content_start[idx..].starts_with("<div") {
+    loop {
+        let pos = rest
+            .find("data-lyrics-container=\"true\"")
+            .or_else(|| rest.find("data-lyrics-container='true'"));
+        let Some(pos) = pos else { break };
+        let after_marker = &rest[pos..];
+        let Some(gt_pos) = after_marker.find('>') else { break };
+        let content_start = &after_marker[gt_pos + 1..];
+
+        let mut depth = 1_i32;
+        let mut idx = 0_usize;
+        let mut end_idx = content_start.len();
+
+        while idx < content_start.len() && depth > 0 {
+            let next_open = content_start[idx..].find("<div").map(|p| idx + p);
+            let next_close = content_start[idx..].find("</div>").map(|p| idx + p);
+            match (next_open, next_close) {
+                (Some(o), Some(c)) if o < c => {
                     depth += 1;
-                    idx += 4;
-                } else if content_start[idx..].starts_with("</div>") {
+                    idx = o + 4;
+                }
+                (_, Some(c)) => {
                     depth -= 1;
                     if depth == 0 {
+                        end_idx = c;
                         break;
                     }
-                    idx += 6;
-                } else {
-                    idx += 1;
+                    idx = c + 6;
                 }
+                _ => break,
             }
-            let chunk = &content_start[..idx];
-            let clean = strip_html_tags(chunk);
-            if !clean.trim().is_empty() {
-                if !collected.is_empty() {
-                    collected.push('\n');
-                }
-                collected.push_str(clean.trim());
-            }
-            rest = &content_start[idx..];
-        } else {
-            break;
         }
+
+        let chunk = &content_start[..end_idx];
+        let clean = strip_html_tags(chunk);
+        if !clean.trim().is_empty() {
+            if !collected.is_empty() {
+                collected.push('\n');
+            }
+            collected.push_str(clean.trim());
+        }
+        rest = &content_start[end_idx..];
     }
 
     let trimmed = collected.trim().to_string();
@@ -898,7 +1039,7 @@ pub fn fetch_lyrics(
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
-        .timeout(Duration::from_secs(4))
+        .timeout(Duration::from_secs(12))
         .build()
         .map_err(|e| e.to_string())?;
 

@@ -10,7 +10,7 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use audio::AudioPlayer;
 use models::{PlaybackStatus, PlaylistItem, TrackItem};
-use providers::{ArtistProfile, TrackLyrics};
+use providers::{ArtistProfile, TrackLyrics, YandexSearchResult};
 
 pub struct AppState {
     pub db: Mutex<Connection>,
@@ -183,8 +183,29 @@ fn search_yandex_tracks(query: String, state: State<AppState>) -> Result<Vec<Tra
 }
 
 #[tauri::command]
+async fn search_yandex_all(
+    query: String,
+    state: State<'_, AppState>,
+) -> Result<YandexSearchResult, String> {
+    let token = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::get_setting(&conn, "yandex_token")?.unwrap_or_default()
+    };
+    if token.trim().is_empty() {
+        return Ok(YandexSearchResult {
+            artists: Vec::new(),
+            tracks: Vec::new(),
+        });
+    }
+    tauri::async_runtime::spawn_blocking(move || providers::search_yandex_all(&token, &query))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn get_artist_profile(
     artist_name: String,
+    artist_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ArtistProfile, String> {
     let token = {
@@ -192,7 +213,7 @@ async fn get_artist_profile(
         db::get_setting(&conn, "yandex_token")?.unwrap_or_default()
     };
     tauri::async_runtime::spawn_blocking(move || {
-        providers::get_artist_profile(&token, &artist_name)
+        providers::get_artist_profile(&token, &artist_name, artist_id.as_deref())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -429,6 +450,7 @@ pub fn run() {
             logout_yandex,
             open_yandex_auth,
             search_yandex_tracks,
+            search_yandex_all,
             get_artist_profile,
             get_album_tracks,
             get_yandex_wave,

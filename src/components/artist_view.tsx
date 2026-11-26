@@ -15,6 +15,9 @@ import {
 } from 'lucide-react';
 import { TrackItem, getCoverGradient } from '../shared/models';
 import { TrackList, formatDuration } from './track_list';
+import { ArtistLinks } from './artist_links';
+
+const artistProfileCache = new Map<string, ArtistProfile>();
 
 export interface ArtistAlbum {
   id: string;
@@ -38,6 +41,7 @@ export interface ArtistProfile {
   tracksCount: number;
   albumsCount: number;
   likesCount: number;
+  monthlyListeners: number;
   popularTracks: TrackItem[];
   allTracks: TrackItem[];
   albums: ArtistAlbum[];
@@ -46,6 +50,7 @@ export interface ArtistProfile {
 
 interface ArtistViewProps {
   artistName: string;
+  artistId?: string;
   localTracks: TrackItem[];
   favoriteIds: Set<string>;
   currentTrackId: string | null;
@@ -60,6 +65,7 @@ type ArtistSubPage = 'overview' | 'all-tracks' | 'all-albums' | 'familiar' | 'al
 
 export const ArtistView: React.FC<ArtistViewProps> = ({
   artistName,
+  artistId,
   localTracks,
   favoriteIds,
   currentTrackId,
@@ -107,8 +113,21 @@ export const ArtistView: React.FC<ArtistViewProps> = ({
       setIsArtistLiked(false);
     }
 
-    invoke<ArtistProfile>('get_artist_profile', { artistName })
+    const cacheKey = artistId ? `id:${artistId}` : `name:${artistName.toLowerCase()}`;
+    const cached = artistProfileCache.get(cacheKey);
+    if (cached) {
+      setProfile(cached);
+      setIsLoading(false);
+      return;
+    }
+
+    invoke<ArtistProfile>('get_artist_profile', {
+      artistName,
+      artistId: artistId ?? null,
+    })
       .then((data) => {
+        artistProfileCache.set(cacheKey, data);
+        artistProfileCache.set(`name:${data.name.toLowerCase()}`, data);
         if (!cancelled) setProfile(data);
       })
       .catch((err) => {
@@ -123,7 +142,7 @@ export const ArtistView: React.FC<ArtistViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [artistName]);
+  }, [artistName, artistId]);
 
   const toggleArtistLike = () => {
     setIsArtistLiked((prev) => {
@@ -385,7 +404,9 @@ export const ArtistView: React.FC<ArtistViewProps> = ({
             >
               <Users size={14} style={{ opacity: 0.8 }} />
               <span>
-                {profile && profile.likesCount > 0
+                {profile && profile.monthlyListeners > 0
+                  ? `${profile.monthlyListeners.toLocaleString('ru-RU')} слушателей в месяц`
+                  : profile && profile.likesCount > 0
                   ? `${profile.likesCount.toLocaleString('ru-RU')} слушателей`
                   : `${mergedAllTracks.length} треков`}
               </span>
@@ -504,7 +525,7 @@ export const ArtistView: React.FC<ArtistViewProps> = ({
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: latestRelease ? 'minmax(0, 1.75fr) minmax(240px, 0.85fr)' : '1fr',
+              gridTemplateColumns: latestRelease ? 'minmax(0, 1fr) 210px' : '1fr',
               gap: 28,
               marginTop: 28,
               alignItems: 'start',
@@ -602,7 +623,10 @@ export const ArtistView: React.FC<ArtistViewProps> = ({
                               whiteSpace: 'nowrap',
                             }}
                           >
-                            {track.artist}
+                            <ArtistLinks
+                              artist={track.artist}
+                              onSelectArtist={onOpenArtist}
+                            />
                           </div>
                         </div>
                       </div>

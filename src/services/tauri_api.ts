@@ -14,6 +14,18 @@ export interface TrackLyrics {
   instrumental: boolean;
 }
 
+export interface SearchArtistItem {
+  id: string;
+  name: string;
+  coverUrl?: string;
+  tracksCount: number;
+}
+
+export interface YandexSearchResult {
+  artists: SearchArtistItem[];
+  tracks: TrackItem[];
+}
+
 export async function pickMusicFolder(): Promise<string | null> {
   const selected = await open({
     directory: true,
@@ -45,6 +57,11 @@ export const tauriApi = {
   searchYandexTracks: async (query: string): Promise<TrackItem[]> => {
     if (!query.trim()) return [];
     return invoke<TrackItem[]>('search_yandex_tracks', { query });
+  },
+
+  searchYandexAll: async (query: string): Promise<YandexSearchResult> => {
+    if (!query.trim()) return { artists: [], tracks: [] };
+    return invoke<YandexSearchResult>('search_yandex_all', { query });
   },
 
   getYandexWave: (

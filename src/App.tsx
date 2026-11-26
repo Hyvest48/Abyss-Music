@@ -30,6 +30,7 @@ import { ThemeModal } from './components/theme_modal';
 import { SeasonalEffects } from './components/seasonal_effects';
 import { EqualizerModal } from './components/equalizer_modal';
 import { ArtistView } from './components/artist_view';
+import { ArtistLinks } from './components/artist_links';
 import { THEME_PRESETS, ThemePreset } from './shared/themes';
 import {
   PlaybackStatus,
@@ -37,7 +38,12 @@ import {
   TrackItem,
   WaveSettings,
 } from './shared/models';
-import { tauriApi, YandexAuthStatus } from './services/tauri_api';
+import {
+  SearchArtistItem,
+  tauriApi,
+  YandexAuthStatus,
+  YandexSearchResult,
+} from './services/tauri_api';
 
 interface TopSearchBarProps {
   externalValue: string;
@@ -118,6 +124,7 @@ export const App: React.FC = () => {
   const [waveBuffer, setWaveBuffer] = useState<TrackItem[]>([]);
   const [isWaveActive, setIsWaveActive] = useState(false);
   const [searchResults, setSearchResults] = useState<TrackItem[]>([]);
+  const [searchArtists, setSearchArtists] = useState<SearchArtistItem[]>([]);
   const [playlists, setPlaylists] = useState<PlaylistItem[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoadingStream, setIsLoadingStream] = useState(false);
@@ -150,6 +157,7 @@ export const App: React.FC = () => {
   const [selectedEntity, setSelectedEntity] = useState<{
     type: 'artist' | 'album';
     name: string;
+    id?: string;
   } | null>(null);
   const [isEqOpen, setIsEqOpen] = useState(false);
   const [isCmdOpen, setIsCmdOpen] = useState(false);
@@ -183,7 +191,7 @@ export const App: React.FC = () => {
   const isFetchingMoreWaveRef = useRef(false);
   const playedWaveIdsRef = useRef<Set<string>>(new Set());
   const bloomRef = useRef<HTMLDivElement>(null);
-  const searchCacheRef = useRef(new Map<string, TrackItem[]>());
+  const searchCacheRef = useRef(new Map<string, YandexSearchResult>());
   const allTracksRef = useRef<TrackItem[]>([]);
 
   useEffect(() => {
@@ -302,6 +310,7 @@ export const App: React.FC = () => {
       setIsSearchingApi(false);
       startTransition(() => {
         setSearchResults([]);
+        setSearchArtists([]);
       });
       return;
     }
@@ -309,6 +318,7 @@ export const App: React.FC = () => {
     if (!yandexAuth.isAuthorized) {
       setIsSearchingApi(false);
       setSearchResults([]);
+      setSearchArtists([]);
       return;
     }
 
@@ -317,7 +327,8 @@ export const App: React.FC = () => {
     if (cached) {
       setIsSearchingApi(false);
       startTransition(() => {
-        setSearchResults(cached);
+        setSearchResults(cached.tracks);
+        setSearchArtists(cached.artists);
       });
       return;
     }
@@ -327,7 +338,7 @@ export const App: React.FC = () => {
 
     const runSearch = async () => {
       try {
-        const found = await tauriApi.searchYandexTracks(trimmed);
+        const found = await tauriApi.searchYandexAll(trimmed);
         if (cancelled) return;
 
         searchCacheRef.current.set(cacheKey, found);
@@ -337,7 +348,8 @@ export const App: React.FC = () => {
         }
 
         startTransition(() => {
-          setSearchResults(found);
+          setSearchResults(found.tracks);
+          setSearchArtists(found.artists);
         });
       } catch (err) {
         if (!cancelled) {
@@ -711,8 +723,11 @@ export const App: React.FC = () => {
         prev && prev.id === trackId ? { ...prev, isFavorite: nextFav } : prev
       );
 
-      searchCacheRef.current.forEach((cachedList, key) => {
-        searchCacheRef.current.set(key, updateList(cachedList));
+      searchCacheRef.current.forEach((cachedRes, key) => {
+        searchCacheRef.current.set(key, {
+          ...cachedRes,
+          tracks: updateList(cachedRes.tracks),
+        });
       });
 
       if (!target || target.sourceType !== 'local') {
@@ -880,9 +895,9 @@ export const App: React.FC = () => {
     allTracksRef.current = allAvailableTracks;
   }, [allAvailableTracks]);
 
-  const openArtistPage = useCallback((name: string) => {
+  const openArtistPage = useCallback((name: string, id?: string) => {
     setSearchQuery('');
-    setSelectedEntity({ type: 'artist', name });
+    setSelectedEntity({ type: 'artist', name, id });
   }, []);
 
   const openAlbumPage = useCallback((name: string) => {
@@ -1092,6 +1107,7 @@ export const App: React.FC = () => {
           {selectedEntity?.type === 'artist' ? (
             <ArtistView
               artistName={selectedEntity.name}
+              artistId={selectedEntity.id}
               localTracks={tracks}
               favoriteIds={favoriteIds}
               currentTrackId={syncedCurrentTrack?.id ?? null}
@@ -1189,6 +1205,69 @@ export const App: React.FC = () => {
                     transition: 'opacity 0.2s ease',
                   }}
                 >
+                  {(() => {
+                    const q = searchQuery.trim().toLowerCase();
+                    const ymList = searchArtists.slice(0, 8);
+                    const fallbackList: { id?: string; name: string; coverUrl?: string; tracksCount: number }[] = [];
+                    if (ymList.length === 0) {
+                      const artistMap = new Map<string, { name: string; coverUrl?: string; count: number }>();
+                      displayedTracks.forEach((t) => {
+                        t.artist
+                          .split(',')
+                          .map((s) => s.trim())
+                          .filter(Boolean)
+                          .forEach((name) => {
+                            if (!name.toLowerCase().includes(q)) return;
+                            const ex = artistMap.get(name);
+                            if (ex) {
+                              ex.count += 1;
+                              if (!ex.coverUrl && t.coverUrl) ex.coverUrl = t.coverUrl;
+                            } else {
+                              artistMap.set(name, { name, coverUrl: t.coverUrl, count: 1 });
+                            }
+                          });
+                      });
+                      artistMap.forEach((v) =>
+                        fallbackList.push({ name: v.name, coverUrl: v.coverUrl, tracksCount: v.count })
+                      );
+                    }
+                    const matchedArtists = ymList.length > 0 ? ymList : fallbackList.slice(0, 8);
+                    if (matchedArtists.length === 0) return null;
+                    return (
+                      <div style={{ marginBottom: 22 }}>
+                        <div className="section-header-row">
+                          <h3 className="section-heading shimmer-text" style={{ fontSize: 16 }}>
+                            Исполнители
+                          </h3>
+                        </div>
+                        <div className="entity-cards-row">
+                          {matchedArtists.map((art) => (
+                            <button
+                              key={art.id || art.name}
+                              type="button"
+                              className="entity-card"
+                              onClick={() => openArtistPage(art.name, art.id)}
+                            >
+                              <div
+                                className="entity-card-cover round"
+                                style={{
+                                  background: art.coverUrl
+                                    ? `url(${art.coverUrl}) center/cover no-repeat`
+                                    : getCoverGradient(art.name),
+                                }}
+                              >
+                                {!art.coverUrl && <Music size={26} />}
+                              </div>
+                              <div className="entity-card-title">{art.name}</div>
+                              <div className="entity-card-sub">
+                                {art.tracksCount > 0 ? `${art.tracksCount} треков` : 'Исполнитель'}
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
                   <TrackList
                     tracks={visibleTracks}
                     currentTrackId={syncedCurrentTrack?.id ?? null}
@@ -1343,17 +1422,11 @@ export const App: React.FC = () => {
                         <span className="recent-card-title shimmer-text">
                           {syncedCurrentTrack.title}
                         </span>
-                        <span
-                          className="recent-card-artist"
-                          style={{ cursor: 'pointer' }}
-                          onClick={() =>
-                            openArtistPage(
-                              syncedCurrentTrack.artist.split(',')[0]?.trim() ||
-                                syncedCurrentTrack.artist
-                            )
-                          }
-                        >
-                          {syncedCurrentTrack.artist}
+                        <span className="recent-card-artist">
+                          <ArtistLinks
+                            artist={syncedCurrentTrack.artist}
+                            onSelectArtist={openArtistPage}
+                          />
                         </span>
                       </div>
                     </div>
@@ -1491,6 +1564,69 @@ export const App: React.FC = () => {
                       Локальная коллекция ({tracks.length})
                     </h2>
                   </div>
+                  {(() => {
+                    const q = searchQuery.trim().toLowerCase();
+                    const ymList = searchArtists.slice(0, 8);
+                    const fallbackList: { id?: string; name: string; coverUrl?: string; tracksCount: number }[] = [];
+                    if (ymList.length === 0) {
+                      const artistMap = new Map<string, { name: string; coverUrl?: string; count: number }>();
+                      displayedTracks.forEach((t) => {
+                        t.artist
+                          .split(',')
+                          .map((s) => s.trim())
+                          .filter(Boolean)
+                          .forEach((name) => {
+                            if (!name.toLowerCase().includes(q)) return;
+                            const ex = artistMap.get(name);
+                            if (ex) {
+                              ex.count += 1;
+                              if (!ex.coverUrl && t.coverUrl) ex.coverUrl = t.coverUrl;
+                            } else {
+                              artistMap.set(name, { name, coverUrl: t.coverUrl, count: 1 });
+                            }
+                          });
+                      });
+                      artistMap.forEach((v) =>
+                        fallbackList.push({ name: v.name, coverUrl: v.coverUrl, tracksCount: v.count })
+                      );
+                    }
+                    const matchedArtists = ymList.length > 0 ? ymList : fallbackList.slice(0, 8);
+                    if (matchedArtists.length === 0) return null;
+                    return (
+                      <div style={{ marginBottom: 22 }}>
+                        <div className="section-header-row">
+                          <h3 className="section-heading shimmer-text" style={{ fontSize: 16 }}>
+                            Исполнители
+                          </h3>
+                        </div>
+                        <div className="entity-cards-row">
+                          {matchedArtists.map((art) => (
+                            <button
+                              key={art.id || art.name}
+                              type="button"
+                              className="entity-card"
+                              onClick={() => openArtistPage(art.name, art.id)}
+                            >
+                              <div
+                                className="entity-card-cover round"
+                                style={{
+                                  background: art.coverUrl
+                                    ? `url(${art.coverUrl}) center/cover no-repeat`
+                                    : getCoverGradient(art.name),
+                                }}
+                              >
+                                {!art.coverUrl && <Music size={26} />}
+                              </div>
+                              <div className="entity-card-title">{art.name}</div>
+                              <div className="entity-card-sub">
+                                {art.tracksCount > 0 ? `${art.tracksCount} треков` : 'Исполнитель'}
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
                   <TrackList
                     tracks={visibleTracks}
                     currentTrackId={syncedCurrentTrack?.id ?? null}
@@ -1631,7 +1767,12 @@ export const App: React.FC = () => {
               <div className="track-name shimmer-text" style={{ fontSize: 16 }}>
                 {syncedCurrentTrack.title}
               </div>
-              <div className="track-artist">{syncedCurrentTrack.artist}</div>
+              <div className="track-artist">
+                <ArtistLinks
+                  artist={syncedCurrentTrack.artist}
+                  onSelectArtist={openArtistPage}
+                />
+              </div>
             </div>
           )}
 
@@ -1702,6 +1843,7 @@ export const App: React.FC = () => {
         onSeek={handleSeek}
         onVolumeChange={handleVolumeChange}
         onToggleFavorite={handleToggleFavorite}
+        onSelectArtist={openArtistPage}
         onOpenNowPlaying={() => syncedCurrentTrack && setIsNowPlayingOpen(true)}
       />
 
@@ -1745,13 +1887,18 @@ export const App: React.FC = () => {
         track={syncedCurrentTrack}
         isPlaying={playbackStatus.isPlaying}
         positionSec={playbackStatus.positionSec}
+        volume={playbackStatus.volume}
+        isMuted={playbackStatus.isMuted}
         audioLevel={playbackStatus.audioLevel ?? 0}
         onClose={() => setIsNowPlayingOpen(false)}
         onTogglePlay={handleTogglePlay}
         onPrev={handlePrevTrack}
         onNext={() => handleNextTrack(false)}
         onSeek={handleSeek}
+        onVolumeChange={handleVolumeChange}
+        onToggleMute={handleToggleMute}
         onToggleFavorite={handleToggleFavorite}
+        onSelectArtist={openArtistPage}
         onOpenEq={() => setIsEqOpen(true)}
       />
 
