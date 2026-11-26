@@ -15,6 +15,40 @@ pub struct TrackLyrics {
     pub instrumental: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtistAlbum {
+    pub id: String,
+    pub title: String,
+    pub year: Option<u64>,
+    pub cover_url: Option<String>,
+    pub album_type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimilarArtist {
+    pub id: String,
+    pub name: String,
+    pub cover_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtistProfile {
+    pub id: String,
+    pub name: String,
+    pub cover_url: Option<String>,
+    pub genres: Vec<String>,
+    pub tracks_count: u64,
+    pub albums_count: u64,
+    pub likes_count: u64,
+    pub popular_tracks: Vec<TrackItem>,
+    pub all_tracks: Vec<TrackItem>,
+    pub albums: Vec<ArtistAlbum>,
+    pub similar_artists: Vec<SimilarArtist>,
+}
+
 fn iso_timestamp_now() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -62,6 +96,7 @@ fn ym_client(token: &str) -> Result<reqwest::blocking::Client, String> {
     );
 
     reqwest::blocking::Client::builder()
+        .no_proxy()
         .default_headers(headers)
         .timeout(Duration::from_secs(10))
         .build()
@@ -133,6 +168,40 @@ fn parse_ym_track(t: &Value) -> Option<TrackItem> {
     })
 }
 
+fn parse_ym_cover(obj: &Value, size: &str) -> Option<String> {
+    obj.pointer("/cover/uri")
+        .or_else(|| obj.get("coverUri"))
+        .or_else(|| obj.get("ogImage"))
+        .and_then(|v| v.as_str())
+        .map(|uri| format!("https://{}", uri.replace("%%", size)))
+}
+
+fn parse_ym_album(a: &Value) -> Option<ArtistAlbum> {
+    let id = a.get("id")?.to_string().trim_matches('"').to_string();
+    let title = a.get("title")?.as_str()?.to_string();
+    let year = a.get("year").and_then(|v| v.as_u64());
+    let cover_url = parse_ym_cover(a, "400x400");
+    let raw_type = a
+        .get("type")
+        .or_else(|| a.get("metaType"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("album");
+    let album_type = match raw_type {
+        "single" => "Сингл".to_string(),
+        "ep" => "EP".to_string(),
+        "compilation" => "Сборник".to_string(),
+        _ => "Альбом".to_string(),
+    };
+
+    Some(ArtistAlbum {
+        id,
+        title,
+        year,
+        cover_url,
+        album_type,
+    })
+}
+
 fn resolve_station_id(genre: Option<&str>) -> &'static str {
     match genre.map(|g| g.trim()) {
         Some("Хип-хоп") => "genre:rap",
@@ -187,6 +256,203 @@ pub fn search_yandex(token: &str, query: &str) -> Result<Vec<TrackItem>, String>
     Ok(tracks)
 }
 
+/// Полная карточка артиста: инфо, популярные треки, все треки (до 100), альбомы/синглы, похожие артисты
+pub fn get_artist_profile(token: &str, artist_name: &str) -> Result<ArtistProfile, String> {
+    let clean_name = artist_name.split(',').next().unwrap_or(artist_name).trim();
+    if clean_name.is_empty() {
+        return Err("Имя артиста не указано".to_string());
+    }
+
+    let client = ym_client(token)?;
+
+    // 1. Находим artist_id по имени через /search?type=artist
+    let search_url = format!("{}/search", YM_API);
+    let search_resp: Value = client
+        .get(&search_url)
+        .query(&[("text", clean_name), ("type", "artist"), ("page", "0")])
+        .send()
+        .map_err(|e| e.to_string())?
+        .json()
+        .map_err(|e| e.to_string())?;
+
+    let artists_arr = search_resp
+        .pointer("/result/artists/results")
+        .and_then(|v| v.as_array())
+        .ok_or("Артист не найден в Яндекс Музыке")?;
+
+    let matched_artist = artists_arr
+        .iter()
+        .find(|a| {
+            a.get("name")
+                .and_then(|n| n.as_str())
+                .map(|n| n.eq_ignore_ascii_case(clean_name))
+                .unwrap_or(false)
+        })
+        .or_else(|| artists_arr.first())
+        .ok_or("Артист не найден в Яндекс Музыке")?;
+
+    let artist_id = matched_artist
+        .get("id")
+        .ok_or("Не найден ID артиста")?
+        .to_string()
+        .trim_matches('"')
+        .to_string();
+
+    // 2. Загружаем brief-info (шапка, популярные треки, альбомы, похожие артисты)
+    let brief_url = format!("{}/artists/{}/brief-info", YM_API, artist_id);
+    let brief_resp: Value = client
+        .get(&brief_url)
+        .send()
+        .map_err(|e| e.to_string())?
+        .json()
+        .map_err(|e| e.to_string())?;
+
+    let artist_obj = brief_resp.pointer("/result/artist").unwrap_or(matched_artist);
+    let name = artist_obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(clean_name)
+        .to_string();
+    let cover_url = parse_ym_cover(artist_obj, "1000x1000");
+
+    let genres: Vec<String> = artist_obj
+        .get("genres")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|g| g.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let tracks_count = artist_obj
+        .pointer("/counts/tracks")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let albums_count = artist_obj
+        .pointer("/counts/directAlbums")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let likes_count = artist_obj
+        .get("likesCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let popular_tracks: Vec<TrackItem> = brief_resp
+        .pointer("/result/popularTracks")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(parse_ym_track).collect())
+        .unwrap_or_default();
+
+    let mut albums: Vec<ArtistAlbum> = Vec::new();
+    if let Some(direct) = brief_resp.pointer("/result/albums").and_then(|v| v.as_array()) {
+        for a in direct {
+            if let Some(parsed) = parse_ym_album(a) {
+                albums.push(parsed);
+            }
+        }
+    }
+    if let Some(also) = brief_resp.pointer("/result/alsoAlbums").and_then(|v| v.as_array()) {
+        for a in also {
+            if let Some(parsed) = parse_ym_album(a) {
+                if !albums.iter().any(|x| x.id == parsed.id) {
+                    albums.push(parsed);
+                }
+            }
+        }
+    }
+    albums.sort_by(|a, b| b.year.unwrap_or(0).cmp(&a.year.unwrap_or(0)));
+
+    let similar_artists: Vec<SimilarArtist> = brief_resp
+        .pointer("/result/similarArtists")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .take(12)
+                .filter_map(|sa| {
+                    let sid = sa.get("id")?.to_string().trim_matches('"').to_string();
+                    let sname = sa.get("name")?.as_str()?.to_string();
+                    let scover = parse_ym_cover(sa, "300x300");
+                    Some(SimilarArtist {
+                        id: sid,
+                        name: sname,
+                        cover_url: scover,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 3. Загружаем полный каталог треков артиста (/artists/{id}/tracks?page=0&page-size=100)
+    let all_tracks_url = format!("{}/artists/{}/tracks", YM_API, artist_id);
+    let mut all_tracks: Vec<TrackItem> = client
+        .get(&all_tracks_url)
+        .query(&[("page", "0"), ("page-size", "100")])
+        .send()
+        .ok()
+        .and_then(|r| r.json::<Value>().ok())
+        .and_then(|val| {
+            val.pointer("/result/tracks")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(parse_ym_track).collect())
+        })
+        .unwrap_or_default();
+
+    if all_tracks.is_empty() {
+        all_tracks = popular_tracks.clone();
+    }
+
+    let final_tracks_count = if tracks_count > 0 {
+        tracks_count
+    } else {
+        all_tracks.len() as u64
+    };
+
+    Ok(ArtistProfile {
+        id: artist_id,
+        name,
+        cover_url,
+        genres,
+        tracks_count: final_tracks_count,
+        albums_count: if albums_count > 0 {
+            albums_count
+        } else {
+            albums.len() as u64
+        },
+        likes_count,
+        popular_tracks,
+        all_tracks,
+        albums,
+        similar_artists,
+    })
+}
+
+/// Загрузка треков конкретного альбома/сингла артиста
+pub fn get_album_tracks(token: &str, album_id: &str) -> Result<Vec<TrackItem>, String> {
+    let client = ym_client(token)?;
+    let url = format!("{}/albums/{}/with-tracks", YM_API, album_id.trim());
+    let resp: Value = client
+        .get(&url)
+        .send()
+        .map_err(|e| e.to_string())?
+        .json()
+        .map_err(|e| e.to_string())?;
+
+    let mut tracks = Vec::new();
+    if let Some(volumes) = resp.pointer("/result/volumes").and_then(|v| v.as_array()) {
+        for vol in volumes {
+            if let Some(t_arr) = vol.as_array() {
+                for t in t_arr {
+                    if let Some(parsed) = parse_ym_track(t) {
+                        tracks.push(parsed);
+                    }
+                }
+            }
+        }
+    }
+    Ok(tracks)
+}
+
 fn fetch_fresh_2026_releases(
     client: &reqwest::blocking::Client,
     token: &str,
@@ -194,7 +460,6 @@ fn fetch_fresh_2026_releases(
 ) -> Vec<TrackItem> {
     let mut fresh = Vec::new();
 
-    // 1. Забираем витрину свежих релизов Яндекс Музыки (/landing3/new-releases)
     let landing_url = format!("{}/landing3/new-releases", YM_API);
     if let Ok(resp) = client.get(&landing_url).send() {
         if let Ok(json_val) = resp.json::<Value>() {
@@ -237,7 +502,6 @@ fn fetch_fresh_2026_releases(
         }
     }
 
-    // 2. Если выбран жанр или релизов мало — добираем треки с годом выпуска >= 2026 через поиск
     if fresh.len() < 6 {
         let search_q = match genre {
             Some(g) if !g.trim().is_empty() => format!("{} 2026", g.trim()),
@@ -334,7 +598,6 @@ pub fn wave_yandex(
         .map(|arr| arr.iter().filter_map(|item| item.get("track")).collect())
         .unwrap_or_default();
 
-    // Если выбран фильтр «Новинки» — оставляем только свежие релизы >= 2026 и подмешиваем витрину новинок
     if is_new_only {
         let mut tracks: Vec<TrackItem> = raw_items
             .iter()
@@ -468,14 +731,43 @@ pub fn resolve_yandex_stream_url(token: &str, raw_id_or_url: &str) -> Result<Str
     Ok(format!("https://{}/get-mp3/{}/{}{}", host, sign, ts, path))
 }
 
-fn fetch_yandex_lyrics(client: &reqwest::blocking::Client, token: &str, ym_id: &str) -> Option<String> {
+fn fetch_yandex_lyrics(
+    client: &reqwest::blocking::Client,
+    token: &str,
+    ym_id: &str,
+) -> Option<(Option<String>, Option<String>)> {
     if token.trim().is_empty() || ym_id.trim().is_empty() {
         return None;
     }
+
+    let lrc_endpoint = format!("{}/tracks/{}/lyrics", YM_API, ym_id);
+    if let Ok(resp) = client
+        .get(&lrc_endpoint)
+        .query(&[("format", "LRC")])
+        .header("Authorization", format!("OAuth {}", token.trim()))
+        .header("X-Yandex-Music-Client", YM_CLIENT_HEADER)
+        .send()
+    {
+        if resp.status().is_success() {
+            if let Ok(val) = resp.json::<Value>() {
+                if let Some(dl_url) = val.pointer("/result/downloadUrl").and_then(|v| v.as_str()) {
+                    if let Ok(lrc_resp) = client.get(dl_url).send() {
+                        if let Ok(lrc_text) = lrc_resp.text() {
+                            let trimmed = lrc_text.trim().to_string();
+                            if !trimmed.is_empty() && trimmed.contains('[') {
+                                return Some((Some(trimmed), None));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let url = format!("{}/tracks/{}/supplement", YM_API, ym_id);
     let resp = client
         .get(&url)
-        .header("Authorization", format!("OAuth {}", token))
+        .header("Authorization", format!("OAuth {}", token.trim()))
         .header("X-Yandex-Music-Client", YM_CLIENT_HEADER)
         .send()
         .ok()?;
@@ -492,7 +784,7 @@ fn fetch_yandex_lyrics(client: &reqwest::blocking::Client, token: &str, ym_id: &
     if full_lyrics.is_empty() {
         None
     } else {
-        Some(full_lyrics.to_string())
+        Some((None, Some(full_lyrics.to_string())))
     }
 }
 
@@ -556,7 +848,6 @@ fn fetch_genius_lyrics(client: &reqwest::blocking::Client, artist: &str, title: 
         let after_marker = &rest[pos + marker.len()..];
         if let Some(gt_pos) = after_marker.find('>') {
             let content_start = &after_marker[gt_pos + 1..];
-            // Ищем закрывающий </div> для контейнера (учитывая вложенные div)
             let mut depth = 1_i32;
             let mut idx = 0;
             let bytes = content_start.as_bytes();
@@ -596,7 +887,6 @@ fn fetch_genius_lyrics(client: &reqwest::blocking::Client, artist: &str, title: 
     }
 }
 
-/// Загрузка текста песни: Яндекс Музыка -> Genius -> LRCLIB
 pub fn fetch_lyrics(
     track_id: Option<&str>,
     yandex_token: &str,
@@ -606,27 +896,26 @@ pub fn fetch_lyrics(
     duration_seconds: u64,
 ) -> Result<TrackLyrics, String> {
     let client = reqwest::blocking::Client::builder()
+        .no_proxy()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
-        .timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(4))
         .build()
         .map_err(|e| e.to_string())?;
 
     let primary_artist = artist.split(',').next().unwrap_or(artist).trim();
 
-    // 1. Родной API Яндекс.Музыки (работает без VPN)
     if let Some(id) = track_id {
         if let Some(ym_id) = id.strip_prefix("ym-") {
-            if let Some(ym_lyrics) = fetch_yandex_lyrics(&client, yandex_token, ym_id) {
+            if let Some((synced, plain)) = fetch_yandex_lyrics(&client, yandex_token, ym_id) {
                 return Ok(TrackLyrics {
-                    synced_lyrics: None,
-                    plain_lyrics: Some(ym_lyrics),
+                    synced_lyrics: synced,
+                    plain_lyrics: plain,
                     instrumental: false,
                 });
             }
         }
     }
 
-    // 2. Genius (работает без VPN)
     if let Some(genius_lyrics) = fetch_genius_lyrics(&client, primary_artist, title.trim()) {
         return Ok(TrackLyrics {
             synced_lyrics: None,
@@ -635,7 +924,6 @@ pub fn fetch_lyrics(
         });
     }
 
-    // 3. LRCLIB (если доступен)
     let get_url = format!("{}/get", LRCLIB_API);
     let mut req = client.get(&get_url).query(&[
         ("track_name", title.trim()),
@@ -661,7 +949,6 @@ pub fn fetch_lyrics(
         }
     }
 
-    // Резервный поиск по названию и исполнителю
     let search_url = format!("{}/search", LRCLIB_API);
     let query = format!("{} {}", primary_artist, title.trim());
     if let Ok(resp) = client.get(&search_url).query(&[("q", query.as_str())]).send() {

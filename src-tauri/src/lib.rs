@@ -10,7 +10,7 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use audio::AudioPlayer;
 use models::{PlaybackStatus, PlaylistItem, TrackItem};
-use providers::TrackLyrics;
+use providers::{ArtistProfile, TrackLyrics};
 
 pub struct AppState {
     pub db: Mutex<Connection>,
@@ -183,6 +183,38 @@ fn search_yandex_tracks(query: String, state: State<AppState>) -> Result<Vec<Tra
 }
 
 #[tauri::command]
+async fn get_artist_profile(
+    artist_name: String,
+    state: State<'_, AppState>,
+) -> Result<ArtistProfile, String> {
+    let token = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::get_setting(&conn, "yandex_token")?.unwrap_or_default()
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        providers::get_artist_profile(&token, &artist_name)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_album_tracks(
+    album_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<TrackItem>, String> {
+    let token = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::get_setting(&conn, "yandex_token")?.unwrap_or_default()
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        providers::get_album_tracks(&token, &album_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn get_yandex_wave(
     mood: Option<String>,
     activity: Option<String>,
@@ -281,7 +313,7 @@ fn get_eq_gains(state: State<AppState>) -> Result<Vec<f32>, String> {
 }
 
 #[tauri::command]
-async fn play_track(track_id: String, audio_url: String, state: State<'_, AppState>) -> Result<(), String> {
+fn play_track(track_id: String, audio_url: String, state: State<AppState>) -> Result<(), String> {
     let ym_token = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let _ = db::record_play(&conn, &track_id);
@@ -397,6 +429,8 @@ pub fn run() {
             logout_yandex,
             open_yandex_auth,
             search_yandex_tracks,
+            get_artist_profile,
+            get_album_tracks,
             get_yandex_wave,
             send_wave_feedback,
             get_track_lyrics,

@@ -9,8 +9,8 @@ interface TrackListProps {
   isPlaying: boolean;
   onSelectTrack: (track: TrackItem) => void;
   onToggleFavorite: (trackId: string) => void;
-  onSelectArtist?: (artist: string) => void;
-  onSelectAlbum?: (album: string) => void;
+  onSelectArtist?: (artistName: string) => void;
+  onSelectAlbum?: (albumName: string) => void;
 }
 
 export function formatDuration(seconds: number): string {
@@ -69,6 +69,42 @@ export const TrackList: React.FC<TrackListProps> = ({
   onSelectArtist,
   onSelectAlbum,
 }) => {
+  const renderArtists = (rawArtist: string) => {
+    if (!onSelectArtist) {
+      return <div className="track-artist">{rawArtist}</div>;
+    }
+
+    const parts = rawArtist
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    return (
+      <div className="track-artist" onClick={(e) => e.stopPropagation()}>
+        {parts.map((name, index) => (
+          <React.Fragment key={`${name}-${index}`}>
+            {index > 0 && ', '}
+            <span
+              onClick={() => onSelectArtist(name)}
+              style={{ cursor: 'pointer' }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.textDecoration = 'underline';
+                e.currentTarget.style.color = '#ffffff';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.textDecoration = 'none';
+                e.currentTarget.style.color = '';
+              }}
+              title={`Открыть карточку: ${name}`}
+            >
+              {name}
+            </span>
+          </React.Fragment>
+        ))}
+      </div>
+    );
+  };
+
   return (
     <table className="track-table">
       <thead>
@@ -85,6 +121,12 @@ export const TrackList: React.FC<TrackListProps> = ({
       <tbody>
         {tracks.map((track, idx) => {
           const isCurrent = track.id === currentTrackId;
+          const canOpenAlbum =
+            Boolean(onSelectAlbum) &&
+            track.album &&
+            track.album !== 'Яндекс Музыка' &&
+            track.album !== 'Локальная медиатека';
+
           return (
             <tr
               key={track.id}
@@ -115,30 +157,37 @@ export const TrackList: React.FC<TrackListProps> = ({
                   <TrackMiniCover track={track} />
                   <div>
                     <div className="track-name">{track.title}</div>
-                    <div
-                      className={`track-artist ${onSelectArtist ? 'clickable-meta' : ''}`}
-                      onClick={(e) => {
-                        if (!onSelectArtist) return;
-                        e.stopPropagation();
-                        onSelectArtist(track.artist);
-                      }}
-                    >
-                      {track.artist}
-                    </div>
+                    {renderArtists(track.artist)}
                   </div>
                 </div>
               </td>
 
               <td
                 style={{ color: 'rgba(255, 255, 255, 0.56)' }}
-                className={onSelectAlbum ? 'clickable-meta' : ''}
                 onClick={(e) => {
-                  if (!onSelectAlbum) return;
-                  e.stopPropagation();
-                  onSelectAlbum(track.album);
+                  if (canOpenAlbum && onSelectAlbum) {
+                    e.stopPropagation();
+                    onSelectAlbum(track.album);
+                  }
                 }}
               >
-                {track.album}
+                {canOpenAlbum ? (
+                  <span
+                    style={{ cursor: 'pointer' }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.textDecoration = 'underline';
+                      e.currentTarget.style.color = '#ffffff';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.textDecoration = 'none';
+                      e.currentTarget.style.color = '';
+                    }}
+                  >
+                    {track.album}
+                  </span>
+                ) : (
+                  track.album
+                )}
               </td>
 
               <td className="tabular-time">{formatDuration(track.durationSeconds)}</td>

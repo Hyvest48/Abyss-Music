@@ -4,14 +4,14 @@ use std::io::{BufReader, Cursor, Read, Seek};
 use std::sync::mpsc::{self, Sender};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-
-static CURRENT_AUDIO_LEVEL: AtomicU32 = AtomicU32::new(0);
 use std::thread;
 use std::time::Duration;
 use rodio::source::SeekError;
 use rodio::{Decoder, OutputStream, Sink, Source};
 use crate::models::PlaybackStatus;
 use crate::providers;
+
+static CURRENT_AUDIO_LEVEL: AtomicU32 = AtomicU32::new(0);
 
 trait ReadSeek: Read + Seek + Send + Sync {}
 impl<T: Read + Seek + Send + Sync> ReadSeek for T {}
@@ -265,6 +265,7 @@ impl AudioPlayer {
                                 || resolved_source.starts_with("https://")
                             {
                                 let client = reqwest::blocking::Client::builder()
+                                    .no_proxy()
                                     .timeout(Duration::from_secs(20))
                                     .build()
                                     .map_err(|e| format!("Ошибка HTTP-клиента: {}", e))?;
