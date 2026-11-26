@@ -134,11 +134,16 @@ pub fn record_play(conn: &Connection, track_id: &str) -> Result<(), String> {
 }
 
 pub fn toggle_favorite(conn: &Connection, track_id: &str) -> Result<bool, String> {
-    conn.execute(
-        "UPDATE tracks SET is_favorite = CASE WHEN is_favorite = 1 THEN 0 ELSE 1 END WHERE id = ?1",
-        params![track_id],
-    )
-    .map_err(|e| e.to_string())?;
+    let updated = conn
+        .execute(
+            "UPDATE tracks SET is_favorite = CASE WHEN is_favorite = 1 THEN 0 ELSE 1 END WHERE id = ?1",
+            params![track_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+    if updated == 0 {
+        return Ok(false);
+    }
 
     let is_fav: i64 = conn
         .query_row(
@@ -212,5 +217,25 @@ pub fn add_track_to_playlist(conn: &Connection, playlist_id: &str, track_id: &st
         params![playlist_id, track_id],
     )
     .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn rename_playlist(conn: &Connection, id: &str, name: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE playlists SET name = ?1 WHERE id = ?2",
+        params![name, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn delete_playlist(conn: &Connection, id: &str) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
+        params![id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM playlists WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
     Ok(())
 }

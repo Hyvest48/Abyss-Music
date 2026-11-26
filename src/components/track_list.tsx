@@ -9,6 +9,8 @@ interface TrackListProps {
   isPlaying: boolean;
   onSelectTrack: (track: TrackItem) => void;
   onToggleFavorite: (trackId: string) => void;
+  onSelectArtist?: (artist: string) => void;
+  onSelectAlbum?: (album: string) => void;
 }
 
 export function formatDuration(seconds: number): string {
@@ -64,6 +66,8 @@ export const TrackList: React.FC<TrackListProps> = ({
   isPlaying,
   onSelectTrack,
   onToggleFavorite,
+  onSelectArtist,
+  onSelectAlbum,
 }) => {
   return (
     <table className="track-table">
@@ -111,12 +115,31 @@ export const TrackList: React.FC<TrackListProps> = ({
                   <TrackMiniCover track={track} />
                   <div>
                     <div className="track-name">{track.title}</div>
-                    <div className="track-artist">{track.artist}</div>
+                    <div
+                      className={`track-artist ${onSelectArtist ? 'clickable-meta' : ''}`}
+                      onClick={(e) => {
+                        if (!onSelectArtist) return;
+                        e.stopPropagation();
+                        onSelectArtist(track.artist);
+                      }}
+                    >
+                      {track.artist}
+                    </div>
                   </div>
                 </div>
               </td>
 
-              <td style={{ color: 'rgba(255, 255, 255, 0.56)' }}>{track.album}</td>
+              <td
+                style={{ color: 'rgba(255, 255, 255, 0.56)' }}
+                className={onSelectAlbum ? 'clickable-meta' : ''}
+                onClick={(e) => {
+                  if (!onSelectAlbum) return;
+                  e.stopPropagation();
+                  onSelectAlbum(track.album);
+                }}
+              >
+                {track.album}
+              </td>
 
               <td className="tabular-time">{formatDuration(track.durationSeconds)}</td>
 

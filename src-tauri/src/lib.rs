@@ -230,13 +230,30 @@ fn send_wave_feedback(
 }
 
 #[tauri::command]
-fn get_track_lyrics(
+async fn get_track_lyrics(
+    track_id: Option<String>,
     title: String,
     artist: String,
     album: String,
     duration_seconds: u64,
+    state: State<'_, AppState>,
 ) -> Result<TrackLyrics, String> {
-    providers::fetch_lyrics(&title, &artist, &album, duration_seconds)
+    let token = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::get_setting(&conn, "yandex_token")?.unwrap_or_default()
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        providers::fetch_lyrics(
+            track_id.as_deref(),
+            &token,
+            &title,
+            &artist,
+            &album,
+            duration_seconds,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -264,7 +281,7 @@ fn get_eq_gains(state: State<AppState>) -> Result<Vec<f32>, String> {
 }
 
 #[tauri::command]
-fn play_track(track_id: String, audio_url: String, state: State<AppState>) -> Result<(), String> {
+async fn play_track(track_id: String, audio_url: String, state: State<'_, AppState>) -> Result<(), String> {
     let ym_token = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let _ = db::record_play(&conn, &track_id);
@@ -341,6 +358,18 @@ fn add_track_to_playlist(
     db::add_track_to_playlist(&conn, &playlist_id, &track_id)
 }
 
+#[tauri::command]
+fn rename_playlist(id: String, name: String, state: State<AppState>) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::rename_playlist(&conn, &id, &name)
+}
+
+#[tauri::command]
+fn delete_playlist(id: String, state: State<AppState>) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::delete_playlist(&conn, &id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let audio_player = AudioPlayer::new().expect("Не удалось инициализировать аудиодвижок");
@@ -383,7 +412,9 @@ pub fn run() {
             toggle_favorite,
             get_playlists,
             create_playlist,
-            add_track_to_playlist
+            add_track_to_playlist,
+            rename_playlist,
+            delete_playlist
         ])
         .run(tauri::generate_context!())
         .expect("Ошибка запуска Abyss Music");

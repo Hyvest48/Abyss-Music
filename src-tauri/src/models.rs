@@ -31,4 +31,5 @@ pub struct PlaybackStatus {
     pub volume: f32,
     pub is_muted: bool,
     pub is_finished: bool,
+    pub audio_level: f32,
 }

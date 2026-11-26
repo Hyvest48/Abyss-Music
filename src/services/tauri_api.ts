@@ -74,6 +74,7 @@ export const tauriApi = {
 
   getTrackLyrics: (track: TrackItem): Promise<TrackLyrics> =>
     invoke<TrackLyrics>('get_track_lyrics', {
+      trackId: track.id,
       title: track.title,
       artist: track.artist,
       album: track.album,
@@ -112,4 +113,10 @@ export const tauriApi = {
 
   addTrackToPlaylist: (playlistId: string, trackId: string): Promise<void> =>
     invoke('add_track_to_playlist', { playlistId, trackId }),
+
+  renamePlaylist: (id: string, name: string): Promise<void> =>
+    invoke('rename_playlist', { id, name }),
+
+  deletePlaylist: (id: string): Promise<void> =>
+    invoke('delete_playlist', { id }),
 };

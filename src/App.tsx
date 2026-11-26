@@ -17,7 +17,9 @@ import {
   LogIn,
   SkipForward,
   X,
+  Disc3,
 } from 'lucide-react';
+import { getCoverGradient } from './shared/models';
 import { Sidebar, NavTab } from './components/sidebar';
 import { WaveModal } from './components/wave_modal';
 import { TrackList } from './components/track_list';
@@ -25,6 +27,7 @@ import { PlayerBar } from './components/player_bar';
 import { NowPlayingOverlay } from './components/now_playing_overlay';
 import { CommandPalette } from './components/command_palette';
 import { ThemeModal } from './components/theme_modal';
+import { SeasonalEffects } from './components/seasonal_effects';
 import { EqualizerModal } from './components/equalizer_modal';
 import { THEME_PRESETS, ThemePreset } from './shared/themes';
 import {
@@ -143,10 +146,21 @@ export const App: React.FC = () => {
   const [isWaveModalOpen, setIsWaveModalOpen] = useState(false);
 
   const [isNowPlayingOpen, setIsNowPlayingOpen] = useState(false);
+  const [selectedEntity, setSelectedEntity] = useState<{
+    type: 'artist' | 'album';
+    name: string;
+  } | null>(null);
   const [isEqOpen, setIsEqOpen] = useState(false);
   const [isCmdOpen, setIsCmdOpen] = useState(false);
 
   const [isThemeModalOpen, setIsThemeModalOpen] = useState(false);
+  const [isNightMode, setIsNightMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('abyss-night-mode') === 'true';
+    } catch {
+      return false;
+    }
+  });
   const [currentThemeId, setCurrentThemeId] = useState<string>(
     () => localStorage.getItem('abyss-theme') || 'abyss-violet'
   );
@@ -679,7 +693,9 @@ export const App: React.FC = () => {
   }, []);
 
   const handleToggleFavorite = useCallback(async (trackId: string) => {
-    const target = allTracksRef.current.find((t) => t.id === trackId);
+    const target =
+      allTracksRef.current.find((t) => t.id === trackId) ||
+      (currentTrack?.id === trackId ? currentTrack : undefined);
     const nextFav = target ? !target.isFavorite : true;
 
     const updateList = (list: TrackItem[]) =>
@@ -688,6 +704,7 @@ export const App: React.FC = () => {
     setTracks(updateList);
     setWaveBuffer(updateList);
     setSearchResults(updateList);
+    setQueue(updateList);
     setCurrentTrack((prev) =>
       prev && prev.id === trackId ? { ...prev, isFavorite: nextFav } : prev
     );
@@ -696,20 +713,24 @@ export const App: React.FC = () => {
       searchCacheRef.current.set(key, updateList(cachedList));
     });
 
-    setSavedOnlineFavs((prev) => {
-      const filtered = prev.filter((t) => t.id !== trackId);
-      const updated =
-        nextFav && target ? [{ ...target, isFavorite: true }, ...filtered] : filtered;
-      try {
-        localStorage.setItem('abyss-online-favs', JSON.stringify(updated));
-      } catch {}
-      return updated;
-    });
+    if (!target || target.sourceType !== 'local') {
+      setSavedOnlineFavs((prev) => {
+        const filtered = prev.filter((t) => t.id !== trackId);
+        const updated =
+          nextFav && target ? [{ ...target, isFavorite: true }, ...filtered] : filtered;
+        try {
+          localStorage.setItem('abyss-online-favs', JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+    }
 
-    try {
-      await tauriApi.toggleFavorite(trackId);
-    } catch {}
-  }, []);
+    if (target?.sourceType === 'local') {
+      try {
+        await tauriApi.toggleFavorite(trackId);
+      } catch {}
+    }
+  }, [currentTrack]);
 
   const handleCreatePlaylist = async () => {
     const index = playlists.length + 1;
@@ -722,6 +743,30 @@ export const App: React.FC = () => {
       setActiveTab('playlist');
     } catch (err) {
       console.error('Ошибка создания плейлиста:', err);
+    }
+  };
+
+  const handleRenamePlaylist = async (playlistId: string, newName: string) => {
+    setPlaylists((prev) =>
+      prev.map((pl) => (pl.id === playlistId ? { ...pl, name: newName } : pl))
+    );
+    try {
+      await tauriApi.renamePlaylist(playlistId, newName);
+    } catch (err) {
+      console.error('Ошибка переименования плейлиста:', err);
+    }
+  };
+
+  const handleDeletePlaylist = async (playlistId: string) => {
+    setPlaylists((prev) => prev.filter((pl) => pl.id !== playlistId));
+    if (activeTab === 'playlist' && activePlaylistId === playlistId) {
+      setActivePlaylistId(null);
+      setActiveTab('home');
+    }
+    try {
+      await tauriApi.deletePlaylist(playlistId);
+    } catch (err) {
+      console.error('Ошибка удаления плейлиста:', err);
     }
   };
 
@@ -806,6 +851,65 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     allTracksRef.current = allAvailableTracks;
+  }, [allAvailableTracks]);
+
+  const entityData = useMemo(() => {
+    if (!selectedEntity) return null;
+    const matchedTracks = allAvailableTracks.filter((t) =>
+      selectedEntity.type === 'artist'
+        ? t.artist.toLowerCase().includes(selectedEntity.name.toLowerCase())
+        : t.album.toLowerCase() === selectedEntity.name.toLowerCase()
+    );
+    const albumsMap = new Map<string, { name: string; coverUrl?: string; count: number }>();
+    if (selectedEntity.type === 'artist') {
+      matchedTracks.forEach((t) => {
+        if (!t.album || t.album === 'Локальная медиатека' || t.album === 'Яндекс Музыка') return;
+        const existing = albumsMap.get(t.album);
+        if (existing) {
+          existing.count += 1;
+        } else {
+          albumsMap.set(t.album, { name: t.album, coverUrl: t.coverUrl, count: 1 });
+        }
+      });
+    }
+    const coverTrack = matchedTracks.find((t) => t.coverUrl) || matchedTracks[0];
+    return {
+      tracks: matchedTracks,
+      albums: Array.from(albumsMap.values()),
+      coverUrl: coverTrack?.coverUrl,
+      seedId: coverTrack?.id || selectedEntity.name,
+    };
+  }, [selectedEntity, allAvailableTracks]);
+
+  const homeArtists = useMemo(() => {
+    const map = new Map<string, { name: string; coverUrl?: string; count: number }>();
+    allAvailableTracks.forEach((t) => {
+      const primary = t.artist.split(',')[0]?.trim();
+      if (!primary || primary === 'Неизвестный исполнитель') return;
+      const existing = map.get(primary);
+      if (existing) {
+        existing.count += 1;
+        if (!existing.coverUrl && t.coverUrl) existing.coverUrl = t.coverUrl;
+      } else {
+        map.set(primary, { name: primary, coverUrl: t.coverUrl, count: 1 });
+      }
+    });
+    return Array.from(map.values()).slice(0, 12);
+  }, [allAvailableTracks]);
+
+  const homeAlbums = useMemo(() => {
+    const map = new Map<string, { name: string; artist: string; coverUrl?: string; count: number }>();
+    allAvailableTracks.forEach((t) => {
+      if (!t.album || t.album === 'Локальная медиатека' || t.album === 'Яндекс Музыка') return;
+      const existing = map.get(t.album);
+      if (existing) {
+        existing.count += 1;
+        if (!existing.coverUrl && t.coverUrl) existing.coverUrl = t.coverUrl;
+      } else {
+        map.set(t.album, { name: t.album, artist: t.artist, coverUrl: t.coverUrl, count: 1 });
+      }
+    });
+    return Array.from(map.values()).slice(0, 12);
   }, [allAvailableTracks]);
 
   const isSearching = searchQuery.trim().length > 0;
@@ -938,10 +1042,13 @@ export const App: React.FC = () => {
         }}
         onSelectPlaylist={(playlistId) => {
           setSearchQuery('');
+          setSelectedEntity(null);
           setActivePlaylistId(playlistId);
           setActiveTab('playlist');
         }}
         onCreatePlaylist={handleCreatePlaylist}
+        onRenamePlaylist={handleRenamePlaylist}
+        onDeletePlaylist={handleDeletePlaylist}
         onScanFolder={handlePickAndScanFolder}
         onOpenThemes={() => setIsThemeModalOpen(true)}
         onYandexLogin={handleYandexLogin}
@@ -952,7 +1059,161 @@ export const App: React.FC = () => {
         <TopSearchBar externalValue={searchQuery} onSearchCommit={setSearchQuery} />
 
         <div key={viewKey} className="view-transition">
-          {isSearching ? (
+          {selectedEntity && entityData ? (
+            <div className="entity-view">
+              <button
+                type="button"
+                className="wave-settings-btn"
+                style={{ marginBottom: 16 }}
+                onClick={() => setSelectedEntity(null)}
+              >
+                ← Назад
+              </button>
+
+              <div className="entity-hero">
+                <div
+                  className="entity-hero-cover"
+                  style={{
+                    background: entityData.coverUrl
+                      ? `url(${entityData.coverUrl}) center/cover no-repeat`
+                      : getCoverGradient(entityData.seedId),
+                    borderRadius: selectedEntity.type === 'artist' ? '50%' : 18,
+                  }}
+                >
+                  {!entityData.coverUrl && <Music size={42} />}
+                </div>
+                <div className="entity-hero-info">
+                  <span className="entity-hero-badge">
+                    {selectedEntity.type === 'artist' ? 'Исполнитель' : 'Альбом'}
+                  </span>
+                  <h1 className="entity-hero-title">{selectedEntity.name}</h1>
+                  <div className="entity-hero-meta">
+                    {entityData.tracks.length} треков
+                    {selectedEntity.type === 'artist' && entityData.albums.length > 0
+                      ? ` • ${entityData.albums.length} альбомов`
+                      : ''}
+                  </div>
+                  {entityData.tracks.length > 0 && (
+                    <button
+                      type="button"
+                      className="btn-primary-pill"
+                      style={{ marginTop: 14, width: 'fit-content' }}
+                      onClick={() =>
+                        handleSelectTrack(entityData.tracks[0], entityData.tracks)
+                      }
+                    >
+                      <Play size={16} fill="currentColor" style={{ marginRight: 6 }} />
+                      Слушать всё
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {selectedEntity.type === 'artist' ? (
+                <>
+                  <div className="artist-two-col">
+                    <div className="artist-popular-col">
+                      <h2 className="section-heading shimmer-text" style={{ marginBottom: 12 }}>
+                        Популярные треки
+                      </h2>
+                      <TrackList
+                        tracks={entityData.tracks.slice(0, 6)}
+                        currentTrackId={syncedCurrentTrack?.id ?? null}
+                        isPlaying={playbackStatus.isPlaying}
+                        onSelectTrack={(t) => handleSelectTrack(t, entityData.tracks)}
+                        onToggleFavorite={handleToggleFavorite}
+                        onSelectArtist={(name) => setSelectedEntity({ type: 'artist', name })}
+                        onSelectAlbum={(name) => setSelectedEntity({ type: 'album', name })}
+                      />
+                    </div>
+
+                    {entityData.albums.length > 0 && (
+                      <div className="artist-release-col">
+                        <h2 className="section-heading shimmer-text" style={{ marginBottom: 12 }}>
+                          Релиз
+                        </h2>
+                        <button
+                          type="button"
+                          className="artist-featured-release"
+                          onClick={() =>
+                            setSelectedEntity({
+                              type: 'album',
+                              name: entityData.albums[0].name,
+                            })
+                          }
+                        >
+                          <div
+                            className="artist-featured-cover"
+                            style={{
+                              background: entityData.albums[0].coverUrl
+                                ? `url(${entityData.albums[0].coverUrl}) center/cover no-repeat`
+                                : getCoverGradient(entityData.albums[0].name),
+                            }}
+                          >
+                            {!entityData.albums[0].coverUrl && <Disc3 size={36} />}
+                          </div>
+                          <div className="entity-card-title" style={{ fontSize: 15, marginTop: 10 }}>
+                            {entityData.albums[0].name}
+                          </div>
+                          <div className="entity-card-sub">
+                            {entityData.albums[0].count} треков
+                          </div>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {entityData.albums.length > 1 && (
+                    <div style={{ marginTop: 28 }}>
+                      <h2 className="section-heading shimmer-text" style={{ marginBottom: 12 }}>
+                        Альбомы
+                      </h2>
+                      <div className="entity-cards-row">
+                        {entityData.albums.map((alb) => (
+                          <button
+                            key={alb.name}
+                            type="button"
+                            className="entity-card"
+                            onClick={() =>
+                              setSelectedEntity({ type: 'album', name: alb.name })
+                            }
+                          >
+                            <div
+                              className="entity-card-cover"
+                              style={{
+                                background: alb.coverUrl
+                                  ? `url(${alb.coverUrl}) center/cover no-repeat`
+                                  : getCoverGradient(alb.name),
+                              }}
+                            >
+                              {!alb.coverUrl && <Disc3 size={28} />}
+                            </div>
+                            <div className="entity-card-title">{alb.name}</div>
+                            <div className="entity-card-sub">{alb.count} треков</div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div style={{ marginTop: 26 }}>
+                  <h2 className="section-heading shimmer-text" style={{ marginBottom: 12 }}>
+                    Треки
+                  </h2>
+                  <TrackList
+                    tracks={entityData.tracks}
+                    currentTrackId={syncedCurrentTrack?.id ?? null}
+                    isPlaying={playbackStatus.isPlaying}
+                    onSelectTrack={(t) => handleSelectTrack(t, entityData.tracks)}
+                    onToggleFavorite={handleToggleFavorite}
+                    onSelectArtist={(name) => setSelectedEntity({ type: 'artist', name })}
+                    onSelectAlbum={(name) => setSelectedEntity({ type: 'album', name })}
+                  />
+                </div>
+              )}
+            </div>
+          ) : isSearching ? (
             <div>
               <div className="section-header-row" style={{ marginTop: 4 }}>
                 <h2 className="section-heading shimmer-text">
@@ -1195,6 +1456,72 @@ export const App: React.FC = () => {
                 </div>
               )}
 
+              {homeArtists.length > 0 && (
+                <div style={{ marginTop: 28 }}>
+                  <div className="section-header-row">
+                    <h2 className="section-heading shimmer-text">Исполнители</h2>
+                  </div>
+                  <div className="entity-cards-row">
+                    {homeArtists.map((art) => (
+                      <button
+                        key={art.name}
+                        type="button"
+                        className="entity-card"
+                        onClick={() =>
+                          setSelectedEntity({ type: 'artist', name: art.name })
+                        }
+                      >
+                        <div
+                          className="entity-card-cover round"
+                          style={{
+                            background: art.coverUrl
+                              ? `url(${art.coverUrl}) center/cover no-repeat`
+                              : getCoverGradient(art.name),
+                          }}
+                        >
+                          {!art.coverUrl && <Music size={26} />}
+                        </div>
+                        <div className="entity-card-title">{art.name}</div>
+                        <div className="entity-card-sub">{art.count} треков</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {homeAlbums.length > 0 && (
+                <div style={{ marginTop: 28 }}>
+                  <div className="section-header-row">
+                    <h2 className="section-heading shimmer-text">Альбомы</h2>
+                  </div>
+                  <div className="entity-cards-row">
+                    {homeAlbums.map((alb) => (
+                      <button
+                        key={alb.name}
+                        type="button"
+                        className="entity-card"
+                        onClick={() =>
+                          setSelectedEntity({ type: 'album', name: alb.name })
+                        }
+                      >
+                        <div
+                          className="entity-card-cover"
+                          style={{
+                            background: alb.coverUrl
+                              ? `url(${alb.coverUrl}) center/cover no-repeat`
+                              : getCoverGradient(alb.name),
+                          }}
+                        >
+                          {!alb.coverUrl && <Disc3 size={26} />}
+                        </div>
+                        <div className="entity-card-title">{alb.name}</div>
+                        <div className="entity-card-sub">{alb.artist}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {tracks.length > 0 && (
                 <>
                   <div className="section-header-row">
@@ -1428,15 +1755,29 @@ export const App: React.FC = () => {
       <ThemeModal
         isOpen={isThemeModalOpen}
         currentThemeId={currentThemeId}
+        isNightMode={isNightMode}
+        onToggleNightMode={() => {
+          setIsNightMode((prev) => {
+            const next = !prev;
+            try {
+              localStorage.setItem('abyss-night-mode', String(next));
+            } catch {}
+            return next;
+          });
+        }}
         onSelectTheme={(theme: ThemePreset) => setCurrentThemeId(theme.id)}
         onClose={() => setIsThemeModalOpen(false)}
       />
+
+      <SeasonalEffects themeId={currentThemeId} />
+      {isNightMode && <div className="night-mode-overlay" />}
 
       <NowPlayingOverlay
         isOpen={isNowPlayingOpen}
         track={syncedCurrentTrack}
         isPlaying={playbackStatus.isPlaying}
         positionSec={playbackStatus.positionSec}
+        audioLevel={playbackStatus.audioLevel ?? 0}
         onClose={() => setIsNowPlayingOpen(false)}
         onTogglePlay={handleTogglePlay}
         onPrev={handlePrevTrack}

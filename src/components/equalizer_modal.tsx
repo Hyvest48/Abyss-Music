@@ -111,9 +111,11 @@ export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose 
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(5, 1fr)',
-            gap: 14,
-            padding: '16px 10px',
+            gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
+            gap: 10,
+            width: '100%',
+            boxSizing: 'border-box',
+            padding: '16px 12px',
             borderRadius: 16,
             background: 'rgba(255,255,255,0.03)',
             border: '1px solid rgba(255,255,255,0.06)',

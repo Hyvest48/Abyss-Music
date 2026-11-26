@@ -12,7 +12,9 @@ import {
 } from 'lucide-react';
 import { TrackItem, getCoverGradient } from '../shared/models';
 import { formatDuration } from './track_list';
-import { tauriApi } from '../services/tauri_api';
+import { tauriApi, TrackLyrics } from '../services/tauri_api';
+
+const lyricsCache = new Map<string, TrackLyrics>();
 
 interface LyricLine {
   timeSec: number;
@@ -24,6 +26,7 @@ interface NowPlayingOverlayProps {
   track: TrackItem | null;
   isPlaying: boolean;
   positionSec: number;
+  audioLevel?: number;
   onClose: () => void;
   onTogglePlay: () => void;
   onPrev: () => void;
@@ -55,6 +58,7 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
   track,
   isPlaying,
   positionSec,
+  audioLevel = 0,
   onClose,
   onTogglePlay,
   onPrev,
@@ -69,27 +73,43 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
   const [isLoadingLyrics, setIsLoadingLyrics] = useState(false);
   const activeLineRef = useRef<HTMLButtonElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const audioLevelRef = useRef(audioLevel);
+  audioLevelRef.current = audioLevel;
 
   useEffect(() => {
-    if (!isOpen || !track) return;
+    if (!track) return;
     let cancelled = false;
 
+    const applyLyrics = (data: TrackLyrics) => {
+      if (data.syncedLyrics) {
+        setSyncedLyrics(parseLrc(data.syncedLyrics));
+      } else if (data.plainLyrics) {
+        setPlainLyrics(data.plainLyrics);
+      } else if (data.instrumental) {
+        setIsInstrumental(true);
+      }
+    };
+
+    const cached = lyricsCache.get(track.id);
+    if (cached) {
+      setSyncedLyrics([]);
+      setPlainLyrics(null);
+      setIsInstrumental(false);
+      setIsLoadingLyrics(false);
+      applyLyrics(cached);
+      return;
+    }
+
     const loadLyrics = async () => {
-      setIsLoadingLyrics(true);
+      if (isOpen) setIsLoadingLyrics(true);
       setSyncedLyrics([]);
       setPlainLyrics(null);
       setIsInstrumental(false);
       try {
         const data = await tauriApi.getTrackLyrics(track);
+        lyricsCache.set(track.id, data);
         if (cancelled) return;
-
-        if (data.syncedLyrics) {
-          setSyncedLyrics(parseLrc(data.syncedLyrics));
-        } else if (data.plainLyrics) {
-          setPlainLyrics(data.plainLyrics);
-        } else if (data.instrumental) {
-          setIsInstrumental(true);
-        }
+        applyLyrics(data);
       } catch {
       } finally {
         if (!cancelled) setIsLoadingLyrics(false);
@@ -130,10 +150,15 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
     if (!ctx) return;
 
     let rafId = 0;
+    let lastTime = performance.now();
     const bars = 28;
     const heights = new Array(bars).fill(4);
 
     const render = (time: number) => {
+      const dt = Math.min(0.05, Math.max(0.001, (time - lastTime) / 1000));
+      lastTime = time;
+      const lerp = 1 - Math.exp(-14 * dt);
+
       const w = canvas.width;
       const h = canvas.height;
       ctx.clearRect(0, 0, w, h);
@@ -143,22 +168,28 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
           .getPropertyValue('--accent-warm')
           .trim() || '#d4b88c';
 
-      const barW = w / bars - 4;
+      const barW = Math.max(3, w / bars - 4);
+      const center = bars / 2;
+      const amp = isPlaying ? Math.min(1.8, Math.max(0.25, audioLevelRef.current * 4.2)) : 0;
       for (let i = 0; i < bars; i++) {
+        const dist = 1 - Math.abs(i - center) / center;
+        const envelope = 0.4 + 0.6 * dist;
         const wave = isPlaying
-          ? (Math.sin(time * 0.0045 + i * 0.55) * 0.5 + 0.5) *
-              (Math.cos(time * 0.0028 - i * 0.3) * 0.5 + 0.5) *
-              (h - 6) +
+          ? (Math.sin(time * 0.008 + i * 0.7) * 0.5 + 0.5) *
+              (Math.cos(time * 0.005 - i * 0.45) * 0.5 + 0.5) *
+              (h - 6) *
+              envelope *
+              amp +
             5
-          : 4;
-        heights[i] += (wave - heights[i]) * 0.16;
+          : 5;
+        heights[i] += (wave - heights[i]) * lerp;
 
         const x = i * (barW + 4);
-        const barH = heights[i];
+        const barH = Math.max(4, heights[i]);
         const y = h - barH;
 
         ctx.fillStyle = accent;
-        ctx.globalAlpha = isPlaying ? 0.85 : 0.28;
+        ctx.globalAlpha = isPlaying ? 0.9 : 0.32;
         ctx.beginPath();
         ctx.roundRect(x, y, barW, barH, 999);
         ctx.fill();

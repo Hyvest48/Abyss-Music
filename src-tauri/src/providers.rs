@@ -468,22 +468,175 @@ pub fn resolve_yandex_stream_url(token: &str, raw_id_or_url: &str) -> Result<Str
     Ok(format!("https://{}/get-mp3/{}/{}{}", host, sign, ts, path))
 }
 
-/// Загрузка синхронизированного текста песни (LRC) через LRCLIB API
+fn fetch_yandex_lyrics(client: &reqwest::blocking::Client, token: &str, ym_id: &str) -> Option<String> {
+    if token.trim().is_empty() || ym_id.trim().is_empty() {
+        return None;
+    }
+    let url = format!("{}/tracks/{}/supplement", YM_API, ym_id);
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("OAuth {}", token))
+        .header("X-Yandex-Music-Client", YM_CLIENT_HEADER)
+        .send()
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let val: Value = resp.json().ok()?;
+    let full_lyrics = val
+        .get("result")?
+        .get("lyrics")?
+        .get("fullLyrics")?
+        .as_str()?
+        .trim();
+    if full_lyrics.is_empty() {
+        None
+    } else {
+        Some(full_lyrics.to_string())
+    }
+}
+
+fn strip_html_tags(html: &str) -> String {
+    let with_newlines = html
+        .replace("<br>", "\n")
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n")
+        .replace("</div>", "\n");
+    let mut out = String::with_capacity(with_newlines.len());
+    let mut in_tag = false;
+    for ch in with_newlines.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out.replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", " ")
+}
+
+fn fetch_genius_lyrics(client: &reqwest::blocking::Client, artist: &str, title: &str) -> Option<String> {
+    let q = format!("{} {}", artist, title);
+    let resp = client
+        .get("https://genius.com/api/search/multi")
+        .query(&[("q", q.as_str())])
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .send()
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let val: Value = resp.json().ok()?;
+    let sections = val.get("response")?.get("sections")?.as_array()?;
+    let song_url = sections
+        .iter()
+        .find(|s| s.get("type").and_then(|t| t.as_str()) == Some("song"))
+        .and_then(|s| s.get("hits")?.as_array())
+        .and_then(|hits| hits.first())
+        .and_then(|hit| hit.get("result")?.get("url")?.as_str())?;
+
+    let page_html = client
+        .get(song_url)
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .send()
+        .ok()?
+        .text()
+        .ok()?;
+
+    let mut collected = String::new();
+    let marker = "data-lyrics-container=\"true\"";
+    let mut rest = page_html.as_str();
+    while let Some(pos) = rest.find(marker) {
+        let after_marker = &rest[pos + marker.len()..];
+        if let Some(gt_pos) = after_marker.find('>') {
+            let content_start = &after_marker[gt_pos + 1..];
+            // Ищем закрывающий </div> для контейнера (учитывая вложенные div)
+            let mut depth = 1_i32;
+            let mut idx = 0;
+            let bytes = content_start.as_bytes();
+            while idx < bytes.len() && depth > 0 {
+                if content_start[idx..].starts_with("<div") {
+                    depth += 1;
+                    idx += 4;
+                } else if content_start[idx..].starts_with("</div>") {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    idx += 6;
+                } else {
+                    idx += 1;
+                }
+            }
+            let chunk = &content_start[..idx];
+            let clean = strip_html_tags(chunk);
+            if !clean.trim().is_empty() {
+                if !collected.is_empty() {
+                    collected.push('\n');
+                }
+                collected.push_str(clean.trim());
+            }
+            rest = &content_start[idx..];
+        } else {
+            break;
+        }
+    }
+
+    let trimmed = collected.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// Загрузка текста песни: Яндекс Музыка -> Genius -> LRCLIB
 pub fn fetch_lyrics(
+    track_id: Option<&str>,
+    yandex_token: &str,
     title: &str,
     artist: &str,
     album: &str,
     duration_seconds: u64,
 ) -> Result<TrackLyrics, String> {
     let client = reqwest::blocking::Client::builder()
-        .user_agent("AbyssMusic/0.1.0 (https://github.com/Hyvest48/Abyss-Music)")
-        .timeout(Duration::from_secs(8))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+        .timeout(Duration::from_secs(3))
         .build()
         .map_err(|e| e.to_string())?;
 
     let primary_artist = artist.split(',').next().unwrap_or(artist).trim();
-    let get_url = format!("{}/get", LRCLIB_API);
 
+    // 1. Родной API Яндекс.Музыки (работает без VPN)
+    if let Some(id) = track_id {
+        if let Some(ym_id) = id.strip_prefix("ym-") {
+            if let Some(ym_lyrics) = fetch_yandex_lyrics(&client, yandex_token, ym_id) {
+                return Ok(TrackLyrics {
+                    synced_lyrics: None,
+                    plain_lyrics: Some(ym_lyrics),
+                    instrumental: false,
+                });
+            }
+        }
+    }
+
+    // 2. Genius (работает без VPN)
+    if let Some(genius_lyrics) = fetch_genius_lyrics(&client, primary_artist, title.trim()) {
+        return Ok(TrackLyrics {
+            synced_lyrics: None,
+            plain_lyrics: Some(genius_lyrics),
+            instrumental: false,
+        });
+    }
+
+    // 3. LRCLIB (если доступен)
+    let get_url = format!("{}/get", LRCLIB_API);
     let mut req = client.get(&get_url).query(&[
         ("track_name", title.trim()),
         ("artist_name", primary_artist),

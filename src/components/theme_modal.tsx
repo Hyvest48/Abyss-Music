@@ -1,10 +1,12 @@
 import React from 'react';
-import { X, Check } from 'lucide-react';
+import { X, Check, Moon } from 'lucide-react';
 import { THEME_PRESETS, ThemePreset } from '../shared/themes';
 
 interface ThemeModalProps {
   isOpen: boolean;
   currentThemeId: string;
+  isNightMode: boolean;
+  onToggleNightMode: () => void;
   onSelectTheme: (theme: ThemePreset) => void;
   onClose: () => void;
 }
@@ -12,6 +14,8 @@ interface ThemeModalProps {
 export const ThemeModal: React.FC<ThemeModalProps> = ({
   isOpen,
   currentThemeId,
+  isNightMode,
+  onToggleNightMode,
   onSelectTheme,
   onClose,
 }) => {
@@ -31,6 +35,27 @@ export const ThemeModal: React.FC<ThemeModalProps> = ({
             <X size={18} />
           </button>
         </div>
+
+        <button
+          type="button"
+          className={`night-mode-toggle ${isNightMode ? 'active' : ''}`}
+          onClick={onToggleNightMode}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Moon size={16} style={{ color: isNightMode ? '#fbbf24' : 'currentColor' }} />
+            <div style={{ textAlign: 'left' }}>
+              <div style={{ fontSize: 13.5, fontWeight: 700, color: '#fff' }}>
+                Night Mode (True Tone)
+              </div>
+              <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.55)' }}>
+                Тёплые жёлтые оттенки для комфорта глаз вечером
+              </div>
+            </div>
+          </div>
+          <span className={`night-mode-pill ${isNightMode ? 'on' : ''}`}>
+            {isNightMode ? 'ВКЛ' : 'ВЫКЛ'}
+          </span>
+        </button>
 
         <div className="theme-grid">
           {THEME_PRESETS.map((theme) => {

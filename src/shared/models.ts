@@ -23,6 +23,7 @@ export interface PlaybackStatus {
   volume: number;
   isMuted: boolean;
   isFinished: boolean;
+  audioLevel?: number;
 }
 
 export interface WaveSettings {

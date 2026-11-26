@@ -1516,17 +1516,21 @@ img.track-mini-cover {
 }
 
 .now-playing-lyrics {
-  height: 100%;
+  height: 70vh;
   max-height: 70vh;
+  min-height: 0;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  mask-image: linear-gradient(180deg, transparent 0%, #000 14%, #000 86%, transparent 100%);
+  justify-content: flex-start;
+  mask-image: linear-gradient(180deg, transparent 0%, #000 12%, #000 84%, transparent 100%);
 }
 
 .lyrics-scroll {
+  height: 100%;
   overflow-y: auto;
-  padding: 20vh 0;
+  padding: 18vh 12px 26vh 4px;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -1710,4 +1714,302 @@ img.track-mini-cover {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+
+/* ===== ПЛЕЙЛИСТЫ: ДЕЙСТВИЯ И ПЕРЕИМЕНОВАНИЕ ===== */
+.playlist-row {
+  position: relative;
+}
+
+.playlist-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+.playlist-row:hover .playlist-row-actions,
+.playlist-row.active .playlist-row-actions {
+  opacity: 1;
+}
+
+.playlist-rename-input {
+  flex: 1;
+  min-width: 0;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 6px;
+  color: #ffffff;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 3px 7px;
+  outline: none;
+}
+
+/* ===== КЛИКАБЕЛЬНЫЕ АРТИСТЫ И АЛЬБОМЫ ===== */
+.clickable-meta {
+  cursor: pointer;
+  transition: color 0.18s ease, text-decoration-color 0.18s ease;
+}
+
+.clickable-meta:hover {
+  color: #ffffff !important;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* ===== КАРТОЧКИ АРТИСТОВ И АЛЬБОМОВ ===== */
+.entity-view {
+  padding-bottom: 32px;
+}
+
+.entity-hero {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 22px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.entity-hero-cover {
+  width: 136px;
+  height: 136px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.45);
+}
+
+.entity-hero-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.entity-hero-badge {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  color: var(--accent-warm);
+  margin-bottom: 6px;
+}
+
+.entity-hero-title {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 800;
+  line-height: 1.15;
+  color: #ffffff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entity-hero-meta {
+  margin-top: 6px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.56);
+}
+
+.entity-cards-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 14px;
+}
+
+.entity-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+  padding: 12px;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font-family: inherit;
+  transition: transform 0.2s var(--ease-out-expo), background 0.2s ease, border-color 0.2s ease;
+}
+
+.entity-card:hover {
+  transform: translateY(-3px);
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.entity-card-cover {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.8);
+  margin-bottom: 10px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.32);
+}
+
+.entity-card-cover.round {
+  border-radius: 50%;
+}
+
+.entity-card-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #ffffff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entity-card-sub {
+  margin-top: 3px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+
+/* ===== NIGHT MODE (TRUE TONE) ===== */
+.night-mode-overlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: radial-gradient(circle at center, rgba(255, 196, 107, 0.11), rgba(255, 166, 54, 0.16));
+  mix-blend-mode: screen;
+  backdrop-filter: sepia(0.18) saturate(1.08);
+  transition: opacity 0.35s ease;
+}
+
+.night-mode-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: inherit;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.night-mode-toggle:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.night-mode-toggle.active {
+  background: rgba(251, 191, 36, 0.1);
+  border-color: rgba(251, 191, 36, 0.35);
+}
+
+.night-mode-pill {
+  font-size: 11px;
+  font-weight: 800;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.night-mode-pill.on {
+  background: #fbbf24;
+  color: #1a1205;
+}
+
+
+/* ===== ДВУХКОЛОНОЧНАЯ КАРТОЧКА АРТИСТА ===== */
+.artist-two-col {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 230px;
+  gap: 24px;
+  margin-top: 26px;
+  align-items: start;
+}
+
+.artist-popular-col {
+  min-width: 0;
+}
+
+.artist-release-col {
+  min-width: 0;
+}
+
+.artist-featured-release {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  padding: 14px;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font-family: inherit;
+  transition: transform 0.2s var(--ease-out-expo), background 0.2s ease;
+}
+
+.artist-featured-release:hover {
+  transform: translateY(-3px);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.artist-featured-cover {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+}
+
+.queue-scroll {
+  scrollbar-width: none;
+}
+
+.queue-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+
+/* ===== ТЕКСТУРЫ ДЛЯ СЕЗОННЫХ ТЕМ ===== */
+[data-theme='winter'] .app-shell::before,
+[data-theme='autumn'] .app-shell::before,
+[data-theme='spring'] .app-shell::before,
+[data-theme='summer'] .app-shell::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.055;
+}
+
+[data-theme='winter'] .app-shell::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='80' viewBox='0 0 80 80'%3E%3Cg stroke='%23bae6fd' stroke-width='1' fill='none'%3E%3Cpath d='M40 8v64M8 40h64M17 17l46 46M63 17L17 63'/%3E%3Ccircle cx='40' cy='40' r='10'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+[data-theme='autumn'] .app-shell::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='72' height='72' viewBox='0 0 72 72'%3E%3Cpath d='M36 10c8 10 14 18 8 28l-8 10-8-10c-6-10 0-18 8-28z' fill='none' stroke='%23fb923c' stroke-width='1.2'/%3E%3C/svg%3E");
+}
+
+[data-theme='spring'] .app-shell::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='22' r='6' fill='none' stroke='%23f9a8d4' stroke-width='1'/%3E%3Ccircle cx='42' cy='32' r='6' fill='none' stroke='%23f9a8d4' stroke-width='1'/%3E%3Ccircle cx='32' cy='42' r='6' fill='none' stroke='%23f9a8d4' stroke-width='1'/%3E%3Ccircle cx='22' cy='32' r='6' fill='none' stroke='%23f9a8d4' stroke-width='1'/%3E%3C/svg%3E");
+}
+
+[data-theme='summer'] .app-shell::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='84' height='84' viewBox='0 0 84 84'%3E%3Cpath d='M0 42 Q21 28 42 42 T84 42' fill='none' stroke='%23fde047' stroke-width='1.2'/%3E%3C/svg%3E");
 }

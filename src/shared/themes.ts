@@ -29,4 +29,9 @@ export const THEME_PRESETS: ThemePreset[] = [
   { id: 'steel', name: 'Steel Blue', accent: '#94a3b8', accent2: '#e2e8f0', glow: 'rgba(148, 163, 184, 0.18)', bgBase: '#080a0d', sidebarTop: '#12161c' },
   { id: 'champagne', name: 'Champagne', accent: '#e7d4b5', accent2: '#ffffff', glow: 'rgba(231, 212, 181, 0.18)', bgBase: '#0b0a09', sidebarTop: '#171513' },
   { id: 'matrix', name: 'Matrix', accent: '#22c55e', accent2: '#86efac', glow: 'rgba(34, 197, 94, 0.22)', bgBase: '#050b07', sidebarTop: '#0b170f' },
+  { id: 'night-oled', name: 'Night Mode 🌙', accent: '#cbd5e1', accent2: '#64748b', glow: 'rgba(148, 163, 184, 0.12)', bgBase: '#000000', sidebarTop: '#050507' },
+  { id: 'winter', name: 'Зима ❄️', accent: '#e0f2fe', accent2: '#7dd3fc', glow: 'rgba(125, 211, 252, 0.22)', bgBase: '#060a10', sidebarTop: '#0e1724' },
+  { id: 'spring', name: 'Весна 🌸', accent: '#f9a8d4', accent2: '#86efac', glow: 'rgba(249, 168, 212, 0.22)', bgBase: '#0c080c', sidebarTop: '#181018' },
+  { id: 'summer', name: 'Лето ☀️', accent: '#fde047', accent2: '#38bdf8', glow: 'rgba(253, 224, 71, 0.20)', bgBase: '#0a0b07', sidebarTop: '#16180e' },
+  { id: 'autumn', name: 'Осень 🍂', accent: '#fb923c', accent2: '#f59e0b', glow: 'rgba(251, 146, 60, 0.24)', bgBase: '#0e0805', sidebarTop: '#1c100a' },
 ];

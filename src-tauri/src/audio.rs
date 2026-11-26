@@ -2,7 +2,10 @@
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Seek};
 use std::sync::mpsc::{self, Sender};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+
+static CURRENT_AUDIO_LEVEL: AtomicU32 = AtomicU32::new(0);
 use std::thread;
 use std::time::Duration;
 use rodio::source::SeekError;
@@ -143,6 +146,15 @@ where
 
         let ch = self.channel_idx % 8;
         self.channel_idx = (self.channel_idx + 1) % (self.channels as usize);
+
+        let abs_val = (raw as f32).abs() / 32768.0;
+        let prev_level = f32::from_bits(CURRENT_AUDIO_LEVEL.load(Ordering::Relaxed));
+        let next_level = if abs_val > prev_level {
+            prev_level * 0.85 + abs_val * 0.15
+        } else {
+            prev_level * 0.9992 + abs_val * 0.0008
+        };
+        CURRENT_AUDIO_LEVEL.store(next_level.to_bits(), Ordering::Relaxed);
 
         if self.cached_gains.iter().all(|g| g.abs() < 0.05) {
             return Some(raw);
@@ -330,6 +342,11 @@ impl AudioPlayer {
                                     volume,
                                     is_muted,
                                     is_finished: has_started && empty,
+                                    audio_level: if !empty && !paused {
+                                        f32::from_bits(CURRENT_AUDIO_LEVEL.load(Ordering::Relaxed))
+                                    } else {
+                                        0.0
+                                    },
                                 }
                             }
                             None => PlaybackStatus {
@@ -338,6 +355,7 @@ impl AudioPlayer {
                                 volume,
                                 is_muted,
                                 is_finished: false,
+                                audio_level: 0.0,
                             },
                         };
                         let _ = reply.send(status);
@@ -414,6 +432,7 @@ impl AudioPlayer {
                 volume: 0.75,
                 is_muted: false,
                 is_finished: false,
+                audio_level: 0.0,
             };
         }
         reply_rx.recv().unwrap_or(PlaybackStatus {
@@ -422,6 +441,7 @@ impl AudioPlayer {
             volume: 0.75,
             is_muted: false,
             is_finished: false,
+            audio_level: 0.0,
         })
     }
 }
