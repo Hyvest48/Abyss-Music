@@ -22,6 +22,7 @@ pub struct ArtistAlbum {
     pub id: String,
     pub title: String,
     pub year: Option<u64>,
+    pub release_date: Option<String>,
     pub cover_url: Option<String>,
     pub album_type: String,
 }
@@ -135,6 +136,27 @@ impl<'a> YmClient<'a> {
     }
 }
 
+fn validate_ym_id(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '-' || c == '_')
+    {
+        return Err("Некорректный идентификатор Яндекс Музыки".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn send_json(req: reqwest::blocking::RequestBuilder) -> Result<Value, String> {
+    req.send()
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| format!("Ошибка API Яндекс Музыки: {}", e))?
+        .json::<Value>()
+        .map_err(|e| e.to_string())
+}
+
 fn ym_client(token: &str) -> Result<YmClient<'_>, String> {
     let clean = token.trim();
     if clean.is_empty() {
@@ -222,7 +244,16 @@ fn parse_ym_cover(obj: &Value, size: &str) -> Option<String> {
 fn parse_ym_album(a: &Value) -> Option<ArtistAlbum> {
     let id = a.get("id")?.to_string().trim_matches('"').to_string();
     let title = a.get("title")?.as_str()?.to_string();
-    let year = a.get("year").and_then(|v| v.as_u64());
+    let release_date = a
+        .get("releaseDate")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let year = a.get("year").and_then(|v| v.as_u64()).or_else(|| {
+        release_date
+            .as_deref()
+            .and_then(|s| s.get(0..4))
+            .and_then(|y| y.parse::<u64>().ok())
+    });
     let cover_url = parse_ym_cover(a, "400x400");
     let raw_type = a
         .get("type")
@@ -240,6 +271,7 @@ fn parse_ym_album(a: &Value) -> Option<ArtistAlbum> {
         id,
         title,
         year,
+        release_date,
         cover_url,
         album_type,
     })
@@ -260,12 +292,7 @@ fn resolve_station_id(genre: Option<&str>) -> &'static str {
 pub fn get_yandex_account_name(token: &str) -> Result<String, String> {
     let client = ym_client(token)?;
     let url = format!("{}/account/status", YM_API);
-    let resp: Value = client
-        .get(&url)
-        .send()
-        .map_err(|e| e.to_string())?
-        .json()
-        .map_err(|e| e.to_string())?;
+    let resp = send_json(client.get(&url))?;
 
     let name = resp
         .pointer("/result/account/displayName")
@@ -282,13 +309,13 @@ pub fn search_yandex(token: &str, query: &str) -> Result<Vec<TrackItem>, String>
     }
     let client = ym_client(token)?;
     let url = format!("{}/search", YM_API);
-    let resp: Value = client
-        .get(&url)
-        .query(&[("text", query), ("type", "track"), ("page", "0")])
-        .send()
-        .map_err(|e| e.to_string())?
-        .json()
-        .map_err(|e| e.to_string())?;
+    let resp = send_json(client.get(&url).query(&[
+        ("text", query),
+        ("type", "track"),
+        ("page", "0"),
+        ("page-size", "50"),
+        ("nocorrect", "false"),
+    ]))?;
 
     let tracks = resp
         .pointer("/result/tracks/results")
@@ -313,13 +340,7 @@ pub fn resolve_yandex_tracks(token: &str, track_ids: &[String]) -> Result<Vec<Tr
     let client = ym_client(token)?;
     let url = format!("{}/tracks", YM_API);
     let joined = clean_ids.join(",");
-    let resp: Value = client
-        .post(&url)
-        .form(&[("track-ids", joined.as_str())])
-        .send()
-        .map_err(|e| e.to_string())?
-        .json()
-        .map_err(|e| e.to_string())?;
+    let resp = send_json(client.post(&url).form(&[("track-ids", joined.as_str())]))?;
 
     let tracks = resp
         .get("result")
@@ -339,13 +360,43 @@ pub fn search_yandex_all(token: &str, query: &str) -> Result<YandexSearchResult,
     }
     let client = ym_client(token)?;
     let url = format!("{}/search", YM_API);
-    let resp: Value = client
-        .get(&url)
-        .query(&[("text", query), ("type", "all"), ("page", "0")])
-        .send()
-        .map_err(|e| e.to_string())?
-        .json()
-        .map_err(|e| e.to_string())?;
+
+    let (all_res, tracks_res) = std::thread::scope(|s| {
+        let h_all = s.spawn(|| -> Result<Value, String> {
+            send_json(client.get(&url).query(&[
+                ("text", query),
+                ("type", "all"),
+                ("page", "0"),
+                ("nocorrect", "false"),
+            ]))
+        });
+        let h_tracks = s.spawn(|| -> Vec<TrackItem> {
+            client
+                .get(&url)
+                .query(&[
+                    ("text", query),
+                    ("type", "track"),
+                    ("page", "0"),
+                    ("page-size", "50"),
+                    ("nocorrect", "false"),
+                ])
+                .send()
+                .ok()
+                .and_then(|r| r.json::<Value>().ok())
+                .and_then(|val| {
+                    val.pointer("/result/tracks/results")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(parse_ym_track).collect())
+                })
+                .unwrap_or_default()
+        });
+
+        let a = h_all.join().unwrap_or_else(|_| Err("Ошибка потока поиска".to_string()));
+        let t = h_tracks.join().unwrap_or_default();
+        (a, t)
+    });
+
+    let resp = all_res?;
 
     let artists = resp
         .pointer("/result/artists/results")
@@ -371,11 +422,17 @@ pub fn search_yandex_all(token: &str, query: &str) -> Result<YandexSearchResult,
         })
         .unwrap_or_default();
 
-    let tracks = resp
+    let mut tracks: Vec<TrackItem> = resp
         .pointer("/result/tracks/results")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(parse_ym_track).collect())
         .unwrap_or_default();
+
+    for t in tracks_res {
+        if !tracks.iter().any(|x| x.id == t.id) {
+            tracks.push(t);
+        }
+    }
 
     Ok(YandexSearchResult { artists, tracks })
 }
@@ -431,23 +488,18 @@ pub fn get_artist_profile(
             (aid, Some(matched_artist.clone()))
         };
 
-    // Загружаем brief-info и все треки артиста ПАРАЛЛЕЛЬНО для максимальной скорости
-    let brief_url = format!("{}/artists/{}/brief-info", YM_API, artist_id);
-    let all_tracks_url = format!("{}/artists/{}/tracks", YM_API, artist_id);
+    // Загружаем brief-info, все треки и прямые альбомы артиста ПАРАЛЛЕЛЬНО
+    let safe_artist_id = validate_ym_id(&artist_id)?;
+    let brief_url = format!("{}/artists/{}/brief-info", YM_API, safe_artist_id);
+    let all_tracks_url = format!("{}/artists/{}/tracks", YM_API, safe_artist_id);
+    let direct_albums_url = format!("{}/artists/{}/direct-albums", YM_API, safe_artist_id);
 
-    let (brief_res, tracks_res) = std::thread::scope(|s| {
-        let brief_handle = s.spawn(|| -> Result<Value, String> {
-            client
-                .get(&brief_url)
-                .send()
-                .map_err(|e| e.to_string())?
-                .json::<Value>()
-                .map_err(|e| e.to_string())
-        });
+    let (brief_res, tracks_res, direct_albums_res) = std::thread::scope(|s| {
+        let brief_handle = s.spawn(|| -> Result<Value, String> { send_json(client.get(&brief_url)) });
         let tracks_handle = s.spawn(|| -> Vec<TrackItem> {
             client
                 .get(&all_tracks_url)
-                .query(&[("page", "0"), ("page-size", "100")])
+                .query(&[("page", "0"), ("page-size", "200")])
                 .send()
                 .ok()
                 .and_then(|r| r.json::<Value>().ok())
@@ -458,10 +510,25 @@ pub fn get_artist_profile(
                 })
                 .unwrap_or_default()
         });
+        let albums_handle = s.spawn(|| -> Vec<ArtistAlbum> {
+            client
+                .get(&direct_albums_url)
+                .query(&[("page", "0"), ("page-size", "100"), ("sort-by", "year")])
+                .send()
+                .ok()
+                .and_then(|r| r.json::<Value>().ok())
+                .and_then(|val| {
+                    val.pointer("/result/albums")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(parse_ym_album).collect())
+                })
+                .unwrap_or_default()
+        });
 
         let b = brief_handle.join().unwrap_or_else(|_| Err("Ошибка потока brief-info".to_string()));
         let t = tracks_handle.join().unwrap_or_default();
-        (b, t)
+        let da = albums_handle.join().unwrap_or_default();
+        (b, t, da)
     });
 
     let brief_resp = brief_res?;
@@ -511,10 +578,17 @@ pub fn get_artist_profile(
         .unwrap_or_default();
 
     let mut albums: Vec<ArtistAlbum> = Vec::new();
+    for parsed in direct_albums_res {
+        if !albums.iter().any(|x| x.id == parsed.id) {
+            albums.push(parsed);
+        }
+    }
     if let Some(direct) = brief_resp.pointer("/result/albums").and_then(|v| v.as_array()) {
         for a in direct {
             if let Some(parsed) = parse_ym_album(a) {
-                albums.push(parsed);
+                if !albums.iter().any(|x| x.id == parsed.id) {
+                    albums.push(parsed);
+                }
             }
         }
     }
@@ -527,7 +601,41 @@ pub fn get_artist_profile(
             }
         }
     }
-    albums.sort_by(|a, b| b.year.unwrap_or(0).cmp(&a.year.unwrap_or(0)));
+    albums.sort_by(|a, b| {
+        b.year
+            .unwrap_or(0)
+            .cmp(&a.year.unwrap_or(0))
+            .then_with(|| {
+                b.release_date
+                    .as_deref()
+                    .unwrap_or("")
+                    .cmp(a.release_date.as_deref().unwrap_or(""))
+            })
+    });
+
+    // Подгружаем треки из самых свежих релизов (включая вышедшие сегодня), т.к. /artists/{id}/tracks может не сразу их индексировать
+    let newest_album_ids: Vec<String> = albums.iter().take(6).map(|a| a.id.clone()).collect();
+    let newest_release_tracks: Vec<TrackItem> = if !newest_album_ids.is_empty() {
+        std::thread::scope(|s| {
+            let handles: Vec<_> = newest_album_ids
+                .iter()
+                .map(|aid| s.spawn(move || get_album_tracks(token, aid).unwrap_or_default()))
+                .collect();
+            let mut collected = Vec::new();
+            for h in handles {
+                if let Ok(list) = h.join() {
+                    for t in list {
+                        if !collected.iter().any(|x: &TrackItem| x.id == t.id) {
+                            collected.push(t);
+                        }
+                    }
+                }
+            }
+            collected
+        })
+    } else {
+        Vec::new()
+    };
 
     let similar_artists: Vec<SimilarArtist> = brief_resp
         .pointer("/result/similarArtists")
@@ -549,7 +657,17 @@ pub fn get_artist_profile(
         })
         .unwrap_or_default();
 
-    let mut all_tracks = tracks_res;
+    let mut all_tracks: Vec<TrackItem> = Vec::new();
+    for t in newest_release_tracks {
+        if !all_tracks.iter().any(|x| x.id == t.id) {
+            all_tracks.push(t);
+        }
+    }
+    for t in tracks_res {
+        if !all_tracks.iter().any(|x| x.id == t.id) {
+            all_tracks.push(t);
+        }
+    }
     if all_tracks.is_empty() {
         all_tracks = popular_tracks.clone();
     }
@@ -583,13 +701,9 @@ pub fn get_artist_profile(
 /// Загрузка треков конкретного альбома/сингла артиста
 pub fn get_album_tracks(token: &str, album_id: &str) -> Result<Vec<TrackItem>, String> {
     let client = ym_client(token)?;
-    let url = format!("{}/albums/{}/with-tracks", YM_API, album_id.trim());
-    let resp: Value = client
-        .get(&url)
-        .send()
-        .map_err(|e| e.to_string())?
-        .json()
-        .map_err(|e| e.to_string())?;
+    let safe_album_id = validate_ym_id(album_id)?;
+    let url = format!("{}/albums/{}/with-tracks", YM_API, safe_album_id);
+    let resp = send_json(client.get(&url))?;
 
     let mut tracks = Vec::new();
     if let Some(volumes) = resp.pointer("/result/volumes").and_then(|v| v.as_array()) {
@@ -745,11 +859,7 @@ pub fn wave_yandex(
         }
     }
 
-    let resp: Value = req
-        .send()
-        .map_err(|e| e.to_string())?
-        .json()
-        .map_err(|e| e.to_string())?;
+    let resp = send_json(req)?;
 
     let raw_items: Vec<&Value> = resp
         .pointer("/result/sequence")
@@ -836,16 +946,12 @@ pub fn send_yandex_wave_feedback(
 }
 
 pub fn resolve_yandex_stream_url(token: &str, raw_id_or_url: &str) -> Result<String, String> {
-    let track_id = raw_id_or_url.trim_start_matches("ym://").trim_start_matches("ym-");
+    let raw_id = raw_id_or_url.trim_start_matches("ym://").trim_start_matches("ym-");
+    let track_id = validate_ym_id(raw_id)?;
     let client = ym_client(token)?;
 
     let info_url = format!("{}/tracks/{}/download-info", YM_API, track_id);
-    let info_resp: Value = client
-        .get(&info_url)
-        .send()
-        .map_err(|e| e.to_string())?
-        .json()
-        .map_err(|e| e.to_string())?;
+    let info_resp = send_json(client.get(&info_url))?;
 
     let results = info_resp
         .get("result")
@@ -864,10 +970,17 @@ pub fn resolve_yandex_stream_url(token: &str, raw_id_or_url: &str) -> Result<Str
         .and_then(|v| v.as_str())
         .ok_or("Отсутствует downloadInfoUrl")?;
 
-    let xml_text = client
+    if !download_info_url.starts_with("https://") {
+        return Err("Небезопасный URL downloadInfoUrl".to_string());
+    }
+
+    // Запрашиваем XML без OAuth-заголовка, т.к. downloadInfoUrl ведёт на CDN/storage-хост
+    let xml_text = shared_http_client()
         .get(download_info_url)
         .send()
         .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| format!("Ошибка загрузки downloadInfoUrl: {}", e))?
         .text()
         .map_err(|e| e.to_string())?;
 
@@ -895,11 +1008,12 @@ fn fetch_yandex_lyrics(
     token: &str,
     ym_id: &str,
 ) -> Option<(Option<String>, Option<String>)> {
-    if token.trim().is_empty() || ym_id.trim().is_empty() {
+    if token.trim().is_empty() {
         return None;
     }
+    let safe_ym_id = validate_ym_id(ym_id).ok()?;
 
-    let lrc_endpoint = format!("{}/tracks/{}/lyrics", YM_API, ym_id);
+    let lrc_endpoint = format!("{}/tracks/{}/lyrics", YM_API, safe_ym_id);
     if let Ok(resp) = client
         .get(&lrc_endpoint)
         .query(&[("format", "LRC")])
@@ -923,7 +1037,7 @@ fn fetch_yandex_lyrics(
         }
     }
 
-    let url = format!("{}/tracks/{}/supplement", YM_API, ym_id);
+    let url = format!("{}/tracks/{}/supplement", YM_API, safe_ym_id);
     let resp = client
         .get(&url)
         .header("Authorization", format!("OAuth {}", token.trim()))
@@ -975,7 +1089,9 @@ fn strip_html_tags(html: &str) -> String {
 fn clean_title_for_search(title: &str) -> String {
     let mut result = title.to_string();
     for (open, close) in [('(', ')'), ('[', ']')] {
-        while let Some(start) = result.find(open) {
+        let mut offset = 0;
+        while let Some(rel_start) = result[offset..].find(open) {
+            let start = offset + rel_start;
             if let Some(end_rel) = result[start..].find(close) {
                 let inner = result[start + 1..start + end_rel].to_lowercase();
                 if inner.contains("feat")
@@ -986,7 +1102,7 @@ fn clean_title_for_search(title: &str) -> String {
                 {
                     result.replace_range(start..=start + end_rel, "");
                 } else {
-                    break;
+                    offset = start + end_rel + 1;
                 }
             } else {
                 break;

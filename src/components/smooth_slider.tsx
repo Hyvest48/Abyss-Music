@@ -29,6 +29,7 @@ export const SmoothSlider: React.FC<SmoothSliderProps> = ({
     const el = trackRef.current;
     if (!el || max <= 0) return 0;
     const rect = el.getBoundingClientRect();
+    if (rect.width <= 0) return 0;
     const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
     return ratio * max;
   };

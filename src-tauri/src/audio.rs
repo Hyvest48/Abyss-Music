@@ -2,7 +2,7 @@
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Seek};
 use std::sync::mpsc::{self, Sender};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -87,7 +87,7 @@ struct EqualizerSource<S> {
     gains_db: Arc<Mutex<[f32; 5]>>,
     cached_gains: [f32; 5],
     coeffs: [BiquadCoeffs; 5],
-    states: [[BiquadState; 5]; 8],
+    states: Vec<[BiquadState; 5]>,
     channel_idx: usize,
     sample_counter: u32,
     local_level: f32,
@@ -110,7 +110,7 @@ where
             gains_db,
             cached_gains: initial_gains,
             coeffs,
-            states: [[BiquadState::default(); 5]; 8],
+            states: vec![[BiquadState::default(); 5]; channels as usize],
             channel_idx: 0,
             sample_counter: 0,
             local_level: 0.0,
@@ -148,7 +148,7 @@ where
             }
         }
 
-        let ch = self.channel_idx % 8;
+        let ch = self.channel_idx;
         self.channel_idx = (self.channel_idx + 1) % (self.channels as usize);
 
         let abs_val = (raw as f32).abs() / 32768.0;
@@ -198,18 +198,21 @@ where
     }
 
     fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
-        self.states = [[BiquadState::default(); 5]; 8];
+        for ch_state in &mut self.states {
+            *ch_state = [BiquadState::default(); 5];
+        }
         self.channel_idx = 0;
         self.inner.try_seek(pos)
     }
 }
 
 enum AudioCommand {
-    Play {
-        source_path: String,
-        ym_token: Option<String>,
+    LoadDecoded {
+        generation: u64,
+        source: EqualizerSource<Decoder<Box<dyn ReadSeek>>>,
         reply: Sender<Result<(), String>>,
     },
+    StopForNewPlay,
     Pause,
     Resume,
     Seek(u64, Sender<Result<(), String>>),
@@ -221,25 +224,21 @@ enum AudioCommand {
 pub struct AudioPlayer {
     tx: Sender<AudioCommand>,
     eq_gains: Arc<Mutex<[f32; 5]>>,
+    play_generation: Arc<AtomicU64>,
 }
 
 impl AudioPlayer {
     pub fn new() -> Result<Self, String> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<AudioCommand>();
-        let (init_tx, init_rx) = mpsc::channel::<Result<(), String>>();
         let eq_gains = Arc::new(Mutex::new([0.0_f32; 5]));
-        let eq_gains_thread = Arc::clone(&eq_gains);
+        let play_generation = Arc::new(AtomicU64::new(0));
+        let play_gen_thread = Arc::clone(&play_generation);
 
         thread::spawn(move || {
-            let (_stream, stream_handle) = match OutputStream::try_default() {
-                Ok(out) => {
-                    let _ = init_tx.send(Ok(()));
-                    out
-                }
-                Err(e) => {
-                    let _ = init_tx.send(Err(e.to_string()));
-                    return;
-                }
+            let output_pair = OutputStream::try_default().ok();
+            let (_stream_guard, stream_handle) = match output_pair {
+                Some((s, h)) => (Some(s), Some(h)),
+                None => (None, None),
             };
 
             let mut sink: Option<Sink> = None;
@@ -249,61 +248,46 @@ impl AudioPlayer {
 
             while let Ok(cmd) = cmd_rx.recv() {
                 match cmd {
-                    AudioCommand::Play {
-                        source_path,
-                        ym_token,
-                        reply,
-                    } => {
+                    AudioCommand::StopForNewPlay => {
                         if let Some(old_sink) = sink.take() {
                             old_sink.stop();
                         }
-                        let res = (|| -> Result<(), String> {
-                            let resolved_source = if source_path.starts_with("ym://") {
-                                let token = ym_token
-                                    .as_deref()
-                                    .filter(|t| !t.trim().is_empty())
-                                    .ok_or("Для воспроизведения треков Яндекс Музыки войдите в Яндекс ID")?;
-                                providers::resolve_yandex_stream_url(token, &source_path)?
-                            } else {
-                                source_path
-                            };
+                        has_started = false;
+                        CURRENT_AUDIO_LEVEL.store(0.0_f32.to_bits(), Ordering::Relaxed);
+                    }
+                    AudioCommand::LoadDecoded {
+                        generation,
+                        source,
+                        reply,
+                    } => {
+                        if generation != play_gen_thread.load(Ordering::Acquire) {
+                            let _ = reply.send(Ok(()));
+                            continue;
+                        }
+                        if let Some(old_sink) = sink.take() {
+                            old_sink.stop();
+                        }
+                        CURRENT_AUDIO_LEVEL.store(0.0_f32.to_bits(), Ordering::Relaxed);
 
-                            let reader: Box<dyn ReadSeek> = if resolved_source.starts_with("http://")
-                                || resolved_source.starts_with("https://")
-                            {
-                                let bytes = providers::shared_http_client()
-                                    .get(&resolved_source)
-                                    .timeout(Duration::from_secs(20))
-                                    .send()
-                                    .map_err(|e| format!("Ошибка загрузки потока: {}", e))?
-                                    .bytes()
-                                    .map_err(|e| format!("Ошибка чтения аудиопотока: {}", e))?;
-                                Box::new(Cursor::new(bytes.to_vec()))
-                            } else {
-                                let file = File::open(&resolved_source)
-                                    .map_err(|e| format!("Не удалось открыть файл: {}", e))?;
-                                Box::new(BufReader::new(file))
-                            };
-
-                            let decoded = Decoder::new(reader)
-                                .map_err(|e| format!("Ошибка декодирования аудио: {}", e))?;
-                            let eq_source = EqualizerSource::new(decoded, Arc::clone(&eq_gains_thread));
-
-                            let new_sink = Sink::try_new(&stream_handle)
-                                .map_err(|e| e.to_string())?;
-                            new_sink.set_volume(if is_muted { 0.0 } else { volume });
-                            new_sink.append(eq_source);
-                            new_sink.play();
-                            sink = Some(new_sink);
-                            has_started = true;
-                            Ok(())
-                        })();
+                        let res = match stream_handle.as_ref() {
+                            Some(handle) => Sink::try_new(handle)
+                                .map_err(|e| e.to_string())
+                                .map(|new_sink| {
+                                    new_sink.set_volume(if is_muted { 0.0 } else { volume });
+                                    new_sink.append(source);
+                                    new_sink.play();
+                                    sink = Some(new_sink);
+                                    has_started = true;
+                                }),
+                            None => Err("Аудиоустройство вывода не найдено".to_string()),
+                        };
                         let _ = reply.send(res);
                     }
                     AudioCommand::Pause => {
                         if let Some(ref s) = sink {
                             s.pause();
                         }
+                        CURRENT_AUDIO_LEVEL.store(0.0_f32.to_bits(), Ordering::Relaxed);
                     }
                     AudioCommand::Resume => {
                         if let Some(ref s) = sink {
@@ -368,10 +352,10 @@ impl AudioPlayer {
             }
         });
 
-        init_rx.recv().map_err(|e| e.to_string())??;
         Ok(Self {
             tx: cmd_tx,
             eq_gains,
+            play_generation,
         })
     }
 
@@ -392,14 +376,83 @@ impl AudioPlayer {
         path: &str,
         ym_token: Option<&str>,
     ) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+        let generation = self.play_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let _ = self.tx.send(AudioCommand::StopForNewPlay);
+
         let (reply_tx, reply_rx) = mpsc::channel();
-        self.tx
-            .send(AudioCommand::Play {
-                source_path: path.to_string(),
-                ym_token: ym_token.map(|t| t.to_string()),
-                reply: reply_tx,
-            })
-            .map_err(|e| e.to_string())?;
+        let source_path = path.to_string();
+        let token_opt = ym_token.map(|t| t.to_string());
+        let eq_gains = Arc::clone(&self.eq_gains);
+        let play_gen = Arc::clone(&self.play_generation);
+        let cmd_tx = self.tx.clone();
+
+        thread::spawn(move || {
+            let load_res = (|| -> Result<EqualizerSource<Decoder<Box<dyn ReadSeek>>>, String> {
+                let resolved_source = if source_path.starts_with("ym://") {
+                    let token = token_opt
+                        .as_deref()
+                        .filter(|t| !t.trim().is_empty())
+                        .ok_or("Для воспроизведения треков Яндекс Музыки войдите в Яндекс ID")?;
+                    providers::resolve_yandex_stream_url(token, &source_path)?
+                } else {
+                    source_path
+                };
+
+                if generation != play_gen.load(Ordering::Acquire) {
+                    return Err("cancelled".to_string());
+                }
+
+                let reader: Box<dyn ReadSeek> = if resolved_source.starts_with("http://")
+                    || resolved_source.starts_with("https://")
+                {
+                    let resp = providers::shared_http_client()
+                        .get(&resolved_source)
+                        .timeout(Duration::from_secs(45))
+                        .send()
+                        .map_err(|e| format!("Ошибка загрузки потока: {}", e))?
+                        .error_for_status()
+                        .map_err(|e| format!("Сервер вернул ошибку потока: {}", e))?;
+                    let bytes = resp
+                        .bytes()
+                        .map_err(|e| format!("Ошибка чтения аудиопотока: {}", e))?;
+                    Box::new(Cursor::new(bytes))
+                } else {
+                    let file = File::open(&resolved_source)
+                        .map_err(|e| format!("Не удалось открыть файл: {}", e))?;
+                    Box::new(BufReader::new(file))
+                };
+
+                if generation != play_gen.load(Ordering::Acquire) {
+                    return Err("cancelled".to_string());
+                }
+
+                let decoded = Decoder::new(reader)
+                    .map_err(|e| format!("Ошибка декодирования аудио: {}", e))?;
+                Ok(EqualizerSource::new(decoded, eq_gains))
+            })();
+
+            match load_res {
+                Ok(eq_source) => {
+                    if generation != play_gen.load(Ordering::Acquire) {
+                        let _ = reply_tx.send(Ok(()));
+                        return;
+                    }
+                    let _ = cmd_tx.send(AudioCommand::LoadDecoded {
+                        generation,
+                        source: eq_source,
+                        reply: reply_tx,
+                    });
+                }
+                Err(err) => {
+                    if err == "cancelled" {
+                        let _ = reply_tx.send(Ok(()));
+                    } else {
+                        let _ = reply_tx.send(Err(err));
+                    }
+                }
+            }
+        });
+
         Ok(reply_rx)
     }
 

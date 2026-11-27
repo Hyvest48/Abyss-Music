@@ -26,34 +26,58 @@ const PRESETS: { name: string; gains: number[] }[] = [
 
 export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose }) => {
   const [gains, setGains] = useState<number[]>([0, 0, 0, 0, 0]);
+  const eqTimerRef = React.useRef<number | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
+    let cancelled = false;
     tauriApi
       .getEqGains()
       .then((loaded) => {
-        if (Array.isArray(loaded) && loaded.length === 5) {
+        if (!cancelled && Array.isArray(loaded) && loaded.length === 5) {
           setGains(loaded);
         }
       })
       .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen]);
+
+  useEffect(() => {
+    return () => {
+      if (eqTimerRef.current !== null) {
+        window.clearTimeout(eqTimerRef.current);
+      }
+    };
+  }, []);
 
   if (!isOpen) return null;
 
-  const applyGains = async (next: number[]) => {
+  const applyGains = (next: number[], immediate = false) => {
     setGains(next);
-    try {
-      await tauriApi.setEqGains(next);
-    } catch (err) {
-      console.error('Ошибка обновления эквалайзера:', err);
+    if (eqTimerRef.current !== null) {
+      window.clearTimeout(eqTimerRef.current);
+      eqTimerRef.current = null;
+    }
+    if (immediate) {
+      void tauriApi.setEqGains(next).catch((err) => {
+        console.error('Ошибка обновления эквалайзера:', err);
+      });
+    } else {
+      eqTimerRef.current = window.setTimeout(() => {
+        eqTimerRef.current = null;
+        void tauriApi.setEqGains(next).catch((err) => {
+          console.error('Ошибка обновления эквалайзера:', err);
+        });
+      }, 45);
     }
   };
 
   const handleBandChange = (idx: number, val: number) => {
     const next = [...gains];
     next[idx] = val;
-    void applyGains(next);
+    applyGains(next);
   };
 
   return (

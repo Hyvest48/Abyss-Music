@@ -1,5 +1,6 @@
 mod audio;
 mod db;
+mod media_controls;
 mod models;
 mod providers;
 mod scanner;
@@ -9,12 +10,14 @@ use rusqlite::Connection;
 use serde::Serialize;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use audio::AudioPlayer;
+use media_controls::MediaControlsManager;
 use models::{PlaybackStatus, PlaylistItem, TrackItem};
 use providers::{ArtistProfile, TrackLyrics, YandexSearchResult};
 
 pub struct AppState {
     pub db: Mutex<Connection>,
     pub player: Mutex<AudioPlayer>,
+    pub media: MediaControlsManager,
 }
 
 #[derive(Serialize, Clone)]
@@ -30,24 +33,52 @@ fn persist_yandex_token(app: &tauri::AppHandle, raw_token: &str) {
         return;
     }
 
-    if let Some(state) = app.try_state::<AppState>() {
-        if let Ok(conn) = state.db.lock() {
-            let _ = db::set_setting(&conn, "yandex_token", &clean_token);
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Ok(account_name) = providers::get_yandex_account_name(&clean_token) else {
+            return;
+        };
+
+        if let Some(state) = app_handle.try_state::<AppState>() {
+            if let Ok(conn) = state.db.lock() {
+                if db::set_setting(&conn, "yandex_token", &clean_token).is_err() {
+                    return;
+                }
+            }
         }
-    }
 
-    let account_name = providers::get_yandex_account_name(&clean_token).ok();
-    let _ = app.emit(
-        "yandex-auth-success",
-        YandexAuthStatus {
-            is_authorized: true,
-            account_name,
-        },
-    );
+        let _ = app_handle.emit(
+            "yandex-auth-success",
+            YandexAuthStatus {
+                is_authorized: true,
+                account_name: Some(account_name),
+            },
+        );
 
-    if let Some(win) = app.get_webview_window("yandex-auth") {
-        let _ = win.close();
+        if let Some(win) = app_handle.get_webview_window("yandex-auth") {
+            let _ = win.close();
+        }
+    });
+}
+
+fn is_allowed_yandex_auth_url(url: &tauri::Url) -> bool {
+    let url_str = url.as_str();
+    if url_str == "about:blank" || url_str.starts_with("https://abyss-auth-callback.local/") {
+        return true;
     }
+    if url.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let h = host.to_ascii_lowercase();
+    h == "yandex.ru"
+        || h.ends_with(".yandex.ru")
+        || h == "yandex.com"
+        || h.ends_with(".yandex.com")
+        || h == "ya.ru"
+        || h.ends_with(".ya.ru")
 }
 
 #[tauri::command]
@@ -57,8 +88,13 @@ fn get_tracks(state: State<AppState>) -> Result<Vec<TrackItem>, String> {
 }
 
 #[tauri::command]
-fn scan_folder(folder_path: String, state: State<AppState>) -> Result<Vec<TrackItem>, String> {
-    let scanned = scanner::scan_directory(&folder_path);
+async fn scan_folder(
+    folder_path: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<TrackItem>, String> {
+    let scanned = tauri::async_runtime::spawn_blocking(move || scanner::scan_directory(&folder_path))
+        .await
+        .map_err(|e| e.to_string())?;
     let mut conn = state.db.lock().map_err(|e| e.to_string())?;
     db::upsert_tracks(&mut conn, &scanned)?;
     db::get_all_tracks(&conn)
@@ -139,9 +175,13 @@ async fn open_yandex_auth(app: tauri::AppHandle) -> Result<(), String> {
     .on_navigation(move |url| {
         let url_str = url.as_str();
 
-        if let Some(rest) = url_str.strip_prefix("https://abyss-auth-callback.local/?token=") {
-            let token = rest.split('&').next().unwrap_or("");
-            persist_yandex_token(&app_handle, token);
+        if url_str.starts_with("https://abyss-auth-callback.local/") {
+            for (k, v) in url.query_pairs() {
+                if k == "token" && !v.is_empty() {
+                    persist_yandex_token(&app_handle, &v);
+                    break;
+                }
+            }
             return false;
         }
 
@@ -154,18 +194,14 @@ async fn open_yandex_auth(app: tauri::AppHandle) -> Result<(), String> {
             }
         }
 
-        if let Some(query) = url.query() {
-            for pair in query.split('&') {
-                if let Some(token) = pair.strip_prefix("access_token=") {
-                    persist_yandex_token(&app_handle, token);
-                    return false;
-                }
+        for (k, v) in url.query_pairs() {
+            if k == "access_token" && !v.is_empty() {
+                persist_yandex_token(&app_handle, &v);
+                return false;
             }
         }
 
-        url_str == "about:blank"
-            || url_str.starts_with("https://")
-            || url_str.starts_with("http://")
+        is_allowed_yandex_auth_url(url)
     })
     .build()
     .map_err(|e| e.to_string())?;
@@ -391,6 +427,8 @@ async fn play_track(
 fn pause_track(state: State<AppState>) -> Result<(), String> {
     let player = state.player.lock().map_err(|e| e.to_string())?;
     player.pause();
+    let pos = player.status().position_sec;
+    state.media.set_playback(false, pos);
     Ok(())
 }
 
@@ -398,6 +436,168 @@ fn pause_track(state: State<AppState>) -> Result<(), String> {
 fn resume_track(state: State<AppState>) -> Result<(), String> {
     let player = state.player.lock().map_err(|e| e.to_string())?;
     player.resume();
+    let pos = player.status().position_sec;
+    state.media.set_playback(true, pos);
+    Ok(())
+}
+
+#[tauri::command]
+fn update_media_metadata(
+    title: String,
+    artist: String,
+    album: String,
+    cover_url: Option<String>,
+    duration_seconds: u64,
+    state: State<AppState>,
+) -> Result<(), String> {
+    state
+        .media
+        .set_metadata(title, artist, album, cover_url, duration_seconds);
+    state.media.set_playback(true, 0);
+    Ok(())
+}
+
+#[tauri::command]
+fn update_media_playback(
+    is_playing: bool,
+    position_sec: u64,
+    state: State<AppState>,
+) -> Result<(), String> {
+    state.media.set_playback(is_playing, position_sec);
+    Ok(())
+}
+
+#[tauri::command]
+async fn toggle_desktop_widget(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    if let Some(existing) = app.get_webview_window("widget") {
+        let _ = existing.close();
+        let _ = app.emit("widget-visibility-changed", false);
+        return Ok(false);
+    }
+
+    let (saved_x, saved_y, saved_w, saved_h) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let x = db::get_setting(&conn, "widget_pos_x")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<f64>().ok());
+        let y = db::get_setting(&conn, "widget_pos_y")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<f64>().ok());
+        let w = db::get_setting(&conn, "widget_width")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|v| v.clamp(250.0, 560.0))
+            .unwrap_or(392.0);
+        let h = db::get_setting(&conn, "widget_height")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|v| v.clamp(128.0, 300.0))
+            .unwrap_or(204.0);
+        (x, y, w, h)
+    };
+
+    let (mut pos_x, mut pos_y) = (40.0_f64, 40.0_f64);
+    if let (Some(x), Some(y)) = (saved_x, saved_y) {
+        pos_x = x;
+        pos_y = y;
+    } else if let Ok(Some(monitor)) = app.primary_monitor() {
+        let size = monitor.size();
+        let scale = monitor.scale_factor();
+        let logical_w = size.width as f64 / scale;
+        let logical_h = size.height as f64 / scale;
+        pos_x = (logical_w - saved_w - 28.0).max(20.0);
+        pos_y = (logical_h - saved_h - 64.0).max(20.0);
+    }
+
+    let builder = WebviewWindowBuilder::new(
+        &app,
+        "widget",
+        WebviewUrl::App("index.html?widget=1".into()),
+    )
+    .title("Abyss Music Widget")
+    .inner_size(saved_w, saved_h)
+    .min_inner_size(250.0, 128.0)
+    .max_inner_size(560.0, 300.0)
+    .position(pos_x, pos_y)
+    .resizable(true)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .skip_taskbar(true)
+    .always_on_top(true);
+
+    let win = builder.build().map_err(|e| e.to_string())?;
+    let app_handle = app.clone();
+    let win_for_events = win.clone();
+    win.on_window_event(move |event| match event {
+        tauri::WindowEvent::Moved(pos) => {
+            let scale = win_for_events.scale_factor().unwrap_or(1.0);
+            let lx = pos.x as f64 / scale;
+            let ly = pos.y as f64 / scale;
+            if lx > -5000.0 && ly > -5000.0 {
+                if let Some(st) = app_handle.try_state::<AppState>() {
+                    if let Ok(conn) = st.db.lock() {
+                        let _ = db::set_setting(&conn, "widget_pos_x", &lx.round().to_string());
+                        let _ = db::set_setting(&conn, "widget_pos_y", &ly.round().to_string());
+                    }
+                }
+            }
+        }
+        tauri::WindowEvent::Resized(size) => {
+            let scale = win_for_events.scale_factor().unwrap_or(1.0);
+            let lw = size.width as f64 / scale;
+            let lh = size.height as f64 / scale;
+            if lw >= 240.0 && lh >= 120.0 {
+                if let Some(st) = app_handle.try_state::<AppState>() {
+                    if let Ok(conn) = st.db.lock() {
+                        let _ = db::set_setting(&conn, "widget_width", &lw.round().to_string());
+                        let _ = db::set_setting(&conn, "widget_height", &lh.round().to_string());
+                    }
+                }
+            }
+        }
+        tauri::WindowEvent::Destroyed => {
+            let _ = app_handle.emit("widget-visibility-changed", false);
+        }
+        _ => {}
+    });
+
+    let _ = app.emit("widget-visibility-changed", true);
+    Ok(true)
+}
+
+#[tauri::command]
+fn is_desktop_widget_open(app: tauri::AppHandle) -> bool {
+    app.get_webview_window("widget").is_some()
+}
+
+#[tauri::command]
+fn set_widget_pinned(app: tauri::AppHandle, pinned: bool) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("widget") {
+        win.set_always_on_top(pinned).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn close_desktop_widget(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("widget") {
+        win.close().map_err(|e| e.to_string())?;
+    }
+    let _ = app.emit("widget-visibility-changed", false);
+    Ok(())
+}
+
+#[tauri::command]
+fn request_widget_state(app: tauri::AppHandle) -> Result<(), String> {
+    let _ = app.emit("widget-request-state", ());
     Ok(())
 }
 
@@ -462,8 +662,8 @@ fn rename_playlist(id: String, name: String, state: State<AppState>) -> Result<(
 
 #[tauri::command]
 fn delete_playlist(id: String, state: State<AppState>) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    db::delete_playlist(&conn, &id)
+    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::delete_playlist(&mut conn, &id)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -479,9 +679,20 @@ pub fn run() {
                     audio_player.set_eq_gains(arr);
                 }
             }
+            #[cfg(target_os = "windows")]
+            let hwnd_ptr = app
+                .get_webview_window("main")
+                .and_then(|w| w.hwnd().ok())
+                .map(|h| h.0 as usize);
+            #[cfg(not(target_os = "windows"))]
+            let hwnd_ptr = None;
+
+            let media_controls = MediaControlsManager::new(app.handle().clone(), hwnd_ptr);
+
             app.manage(AppState {
                 db: Mutex::new(conn),
                 player: Mutex::new(audio_player),
+                media: media_controls,
             });
             Ok(())
         })
@@ -505,6 +716,13 @@ pub fn run() {
             play_track,
             pause_track,
             resume_track,
+            update_media_metadata,
+            update_media_playback,
+            toggle_desktop_widget,
+            is_desktop_widget_open,
+            set_widget_pinned,
+            close_desktop_widget,
+            request_widget_state,
             seek_track,
             set_volume,
             toggle_mute,

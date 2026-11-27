@@ -538,8 +538,9 @@ button:focus-visible {
 .search-input {
   width: 100%;
   height: 46px;
-  padding: 0 68px 0 46px;
+  padding: 0 78px 0 46px;
   border-radius: 999px;
+  text-overflow: ellipsis;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(16, 16, 20, 0.94);
   color: var(--text-primary);
@@ -712,6 +713,7 @@ button:focus-visible {
 .wave-play-btn {
   width: 58px;
   height: 58px;
+  flex-shrink: 0;
   border-radius: 50%;
   border: none;
   background: #f5f5f7;
@@ -746,6 +748,8 @@ button:focus-visible {
   gap: 10px;
   height: 46px;
   padding: 0 22px;
+  white-space: nowrap;
+  flex-shrink: 0;
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   background: rgba(255, 255, 255, 0.07);
@@ -1715,6 +1719,222 @@ img.track-mini-cover {
 
   .np-visualizer {
     height: 34px;
+  }
+}
+
+@media (max-width: 820px) {
+  .sidebar {
+    width: 196px;
+    min-width: 196px;
+    padding: 20px 12px 100px 12px;
+  }
+
+  .brand-title {
+    font-size: 26px;
+  }
+
+  .nav-pill {
+    justify-content: flex-start;
+    gap: 10px;
+    padding: 0 12px;
+  }
+
+  .nav-pill-icon {
+    position: static;
+    flex-shrink: 0;
+  }
+
+  .player-dock {
+    padding: 0 14px;
+    grid-template-columns: minmax(0, 1fr) 1.25fr auto;
+    gap: 10px;
+  }
+
+  .volume-slider {
+    width: 68px;
+  }
+}
+
+@media (max-width: 900px) {
+  .wave-hero {
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 26px 24px;
+    gap: 18px;
+  }
+
+  .wave-hero-title {
+    font-size: 30px;
+  }
+
+  .wave-controls {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 680px) {
+  .sidebar {
+    width: 156px;
+    min-width: 156px;
+    padding: 16px 8px 96px 8px;
+  }
+
+  .brand-block {
+    margin-bottom: 18px;
+  }
+
+  .brand-title {
+    font-size: 21px;
+  }
+
+  .brand-subtitle {
+    font-size: 10px;
+  }
+
+  .nav-pill {
+    height: 36px;
+    padding: 0 10px;
+    gap: 8px;
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .collection-header {
+    padding: 0 2px 0 4px;
+    gap: 4px;
+  }
+
+  .collection-title {
+    font-size: 11px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .collection-actions .icon-ghost-btn {
+    width: 26px;
+    height: 26px;
+  }
+
+  .main-scroll {
+    padding: 16px 14px 104px 14px;
+  }
+
+  .search-input {
+    height: 40px;
+    font-size: 13px;
+    padding: 0 60px 0 38px;
+  }
+
+  .search-input-icon {
+    left: 13px;
+  }
+
+  .player-dock {
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    height: 70px;
+    padding: 0 10px;
+    border-radius: 16px;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 8px;
+  }
+
+  .player-track-info {
+    gap: 8px;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .player-track-info > div {
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .player-track-info .track-name,
+  .player-track-info .track-sub {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .player-buttons {
+    gap: 6px;
+  }
+
+  .player-buttons > .icon-ghost-btn:first-child,
+  .player-buttons > .icon-ghost-btn:last-child {
+    display: none;
+  }
+
+  .player-play-circle {
+    width: 34px;
+    height: 34px;
+  }
+
+  .progress-row {
+    gap: 6px;
+  }
+
+  .progress-row .tabular-time {
+    display: none;
+  }
+
+  .volume-slider {
+    display: none;
+  }
+
+  .player-right {
+    gap: 2px;
+  }
+
+  .player-right .icon-ghost-btn {
+    width: 28px;
+    height: 28px;
+  }
+}
+
+@media (max-width: 540px) {
+  .sidebar {
+    width: 136px;
+    min-width: 136px;
+  }
+
+  .search-kbd {
+    display: none;
+  }
+
+  .search-input {
+    padding-right: 36px;
+  }
+
+  .player-track-info .track-sub {
+    display: none;
+  }
+
+  .player-right {
+    gap: 0;
+  }
+}
+
+@media (max-height: 540px) {
+  .sidebar {
+    padding-top: 14px;
+    padding-bottom: 86px;
+  }
+
+  .brand-block {
+    margin-bottom: 14px;
+  }
+
+  .player-dock {
+    height: 66px;
+    bottom: 8px;
   }
 }
 

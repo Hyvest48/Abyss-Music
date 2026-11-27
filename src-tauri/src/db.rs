@@ -106,7 +106,8 @@ pub fn upsert_tracks(conn: &mut Connection, tracks: &[TrackItem]) -> Result<(), 
                title = excluded.title,
                artist = excluded.artist,
                album = excluded.album,
-               duration_seconds = excluded.duration_seconds",
+               duration_seconds = excluded.duration_seconds,
+               cover_url = COALESCE(excluded.cover_url, tracks.cover_url)",
             params![
                 t.id,
                 t.title,
@@ -229,13 +230,15 @@ pub fn rename_playlist(conn: &Connection, id: &str, name: &str) -> Result<(), St
     Ok(())
 }
 
-pub fn delete_playlist(conn: &Connection, id: &str) -> Result<(), String> {
-    conn.execute(
+pub fn delete_playlist(conn: &mut Connection, id: &str) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute(
         "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
         params![id],
     )
     .map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM playlists WHERE id = ?1", params![id])
+    tx.execute("DELETE FROM playlists WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }

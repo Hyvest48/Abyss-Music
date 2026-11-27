@@ -1,7 +1,6 @@
-import React, { useState } from 'react';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import React, { useEffect, useState } from 'react';
 import { Heart, Music, Clock, Play } from 'lucide-react';
-import { TrackItem, getCoverGradient } from '../shared/models';
+import { TrackItem, getCoverGradient, resolveCoverSrc } from '../shared/models';
 
 interface TrackListProps {
   tracks: TrackItem[];
@@ -14,27 +13,19 @@ interface TrackListProps {
 }
 
 export function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
-function resolveCoverSrc(coverUrl?: string): string | null {
-  if (!coverUrl) return null;
-  if (
-    coverUrl.startsWith('http://') ||
-    coverUrl.startsWith('https://') ||
-    coverUrl.startsWith('data:') ||
-    coverUrl.startsWith('asset:')
-  ) {
-    return coverUrl;
-  }
-  return convertFileSrc(coverUrl);
-}
-
 const TrackMiniCover: React.FC<{ track: TrackItem }> = ({ track }) => {
   const [hasError, setHasError] = useState(false);
   const src = resolveCoverSrc(track.coverUrl);
+
+  useEffect(() => {
+    setHasError(false);
+  }, [src]);
 
   if (src && !hasError) {
     return (

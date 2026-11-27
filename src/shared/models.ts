@@ -1,3 +1,5 @@
+import { convertFileSrc } from '@tauri-apps/api/core';
+
 export interface TrackItem {
   id: string;
   title: string;
@@ -48,6 +50,21 @@ export function getCoverGradient(seed: string): string {
     hash = (hash * 31 + seed.charCodeAt(i)) | 0;
   }
   return COVER_GRADIENTS[Math.abs(hash) % COVER_GRADIENTS.length];
+}
+
+export function resolveCoverSrc(coverUrl?: string | null): string | null {
+  if (!coverUrl) return null;
+  if (
+    coverUrl.startsWith('http://') ||
+    coverUrl.startsWith('https://') ||
+    coverUrl.startsWith('data:') ||
+    coverUrl.startsWith('asset:') ||
+    coverUrl.startsWith('http://asset.localhost') ||
+    coverUrl.startsWith('https://asset.localhost')
+  ) {
+    return coverUrl;
+  }
+  return convertFileSrc(coverUrl);
 }
 
 export const WAVE_CATEGORIES = {

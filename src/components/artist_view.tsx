@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   ArrowLeft,
@@ -23,6 +23,7 @@ export interface ArtistAlbum {
   id: string;
   title: string;
   year?: number;
+  releaseDate?: string;
   coverUrl?: string;
   albumType: string;
 }
@@ -84,6 +85,7 @@ export const ArtistView: React.FC<ArtistViewProps> = ({
   const [selectedAlbum, setSelectedAlbum] = useState<ArtistAlbum | null>(null);
   const [albumTracks, setAlbumTracks] = useState<TrackItem[]>([]);
   const [isLoadingAlbum, setIsLoadingAlbum] = useState(false);
+  const albumReqSeqRef = useRef(0);
 
   const [isArtistLiked, setIsArtistLiked] = useState<boolean>(() => {
     try {
@@ -128,7 +130,21 @@ export const ArtistView: React.FC<ArtistViewProps> = ({
       .then((data) => {
         artistProfileCache.set(cacheKey, data);
         artistProfileCache.set(`name:${data.name.toLowerCase()}`, data);
-        if (!cancelled) setProfile(data);
+        if (artistProfileCache.size > 30) {
+          const oldest = artistProfileCache.keys().next().value;
+          if (oldest !== undefined) artistProfileCache.delete(oldest);
+        }
+        if (!cancelled) {
+          setProfile(data);
+          try {
+            const raw = localStorage.getItem('abyss-liked-artists');
+            const list: string[] = raw ? JSON.parse(raw) : [];
+            setIsArtistLiked(
+              list.includes(artistName.toLowerCase()) ||
+                list.includes(data.name.toLowerCase())
+            );
+          } catch {}
+        }
       })
       .catch((err) => {
         if (!cancelled) {
@@ -141,6 +157,7 @@ export const ArtistView: React.FC<ArtistViewProps> = ({
 
     return () => {
       cancelled = true;
+      albumReqSeqRef.current += 1;
     };
   }, [artistName, artistId]);
 
@@ -234,17 +251,24 @@ export const ArtistView: React.FC<ArtistViewProps> = ({
   }, [subPage, familiarTracks, albumTracks, mergedAllTracks, filterQuery, favoriteIds]);
 
   const handleOpenAlbum = async (album: ArtistAlbum) => {
+    const seq = ++albumReqSeqRef.current;
     setSelectedAlbum(album);
     setSubPage('album-detail');
     setFilterQuery('');
     setIsLoadingAlbum(true);
     try {
       const tracks = await invoke<TrackItem[]>('get_album_tracks', { albumId: album.id });
-      setAlbumTracks(tracks);
+      if (seq === albumReqSeqRef.current) {
+        setAlbumTracks(tracks);
+      }
     } catch {
-      setAlbumTracks([]);
+      if (seq === albumReqSeqRef.current) {
+        setAlbumTracks([]);
+      }
     } finally {
-      setIsLoadingAlbum(false);
+      if (seq === albumReqSeqRef.current) {
+        setIsLoadingAlbum(false);
+      }
     }
   };
 

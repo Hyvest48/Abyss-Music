@@ -12,7 +12,7 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import { TrackItem, getCoverGradient } from '../shared/models';
+import { TrackItem, getCoverGradient, resolveCoverSrc } from '../shared/models';
 import { formatDuration } from './track_list';
 import { SmoothSlider } from './smooth_slider';
 import { ArtistLinks } from './artist_links';
@@ -92,7 +92,7 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
   audioLevelRef.current = audioLevel;
 
   useEffect(() => {
-    if (!track) return;
+    if (!isOpen || !track) return;
     let cancelled = false;
 
     const applyLyrics = (data: TrackLyrics) => {
@@ -116,7 +116,7 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
     }
 
     const loadLyrics = async () => {
-      if (isOpen) setIsLoadingLyrics(true);
+      setIsLoadingLyrics(true);
       setSyncedLyrics([]);
       setPlainLyrics(null);
       setIsInstrumental(false);
@@ -124,6 +124,10 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
         const data = await tauriApi.getTrackLyrics(track);
         if (data.syncedLyrics || data.plainLyrics || data.instrumental) {
           lyricsCache.set(track.id, data);
+          if (lyricsCache.size > 50) {
+            const firstKey = lyricsCache.keys().next().value;
+            if (firstKey !== undefined) lyricsCache.delete(firstKey);
+          }
         }
         if (cancelled) return;
         applyLyrics(data);
@@ -221,13 +225,14 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
   if (!isOpen || !track) return null;
 
   const duration = track.durationSeconds ?? 0;
+  const resolvedCover = resolveCoverSrc(track.coverUrl);
 
   return (
     <div className="now-playing-overlay">
-      {track.coverUrl && (
+      {resolvedCover && (
         <div
           className="now-playing-bg"
-          style={{ backgroundImage: `url(${track.coverUrl})` }}
+          style={{ backgroundImage: `url("${resolvedCover}")` }}
         />
       )}
 
@@ -244,8 +249,8 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
       <div className="now-playing-grid">
         <div className="now-playing-left">
           <div className={`now-playing-cover-wrap ${isPlaying ? 'is-playing' : ''}`}>
-            {track.coverUrl ? (
-              <img src={track.coverUrl} alt={track.title} className="now-playing-cover" />
+            {resolvedCover ? (
+              <img src={resolvedCover} alt={track.title} className="now-playing-cover" />
             ) : (
               <div
                 className="now-playing-cover"

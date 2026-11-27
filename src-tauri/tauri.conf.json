@@ -13,8 +13,10 @@
     "windows": [
       {
         "title": "abyss-music-rust",
-        "width": 800,
-        "height": 600
+        "width": 1100,
+        "height": 720,
+        "minWidth": 480,
+        "minHeight": 420
       }
     ],
     "security": {

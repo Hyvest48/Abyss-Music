@@ -13,8 +13,9 @@ import {
   Music,
   Sliders,
   MicVocal,
+  PictureInPicture2,
 } from 'lucide-react';
-import { TrackItem, getCoverGradient } from '../shared/models';
+import { TrackItem, getCoverGradient, resolveCoverSrc } from '../shared/models';
 import { formatDuration } from './track_list';
 import { ArtistLinks } from './artist_links';
 
@@ -45,6 +46,7 @@ const SmoothSlider: React.FC<SmoothSliderProps> = ({
     const el = trackRef.current;
     if (!el || max <= 0) return 0;
     const rect = el.getBoundingClientRect();
+    if (rect.width <= 0) return 0;
     const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
     return ratio * max;
   };
@@ -122,6 +124,7 @@ interface PlayerBarProps {
   isQueueOpen: boolean;
   isEqOpen: boolean;
   isLyricsOpen: boolean;
+  isWidgetOpen?: boolean;
   isMuted: boolean;
   positionSec: number;
   volume: number;
@@ -130,6 +133,7 @@ interface PlayerBarProps {
   onToggleRepeat: () => void;
   onToggleQueue: () => void;
   onToggleEq: () => void;
+  onToggleWidget?: () => void;
   onToggleMute: () => void;
   onPrev: () => void;
   onNext: () => void;
@@ -148,6 +152,7 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
   isQueueOpen,
   isEqOpen,
   isLyricsOpen,
+  isWidgetOpen = false,
   isMuted,
   positionSec,
   volume,
@@ -156,6 +161,7 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
   onToggleRepeat,
   onToggleQueue,
   onToggleEq,
+  onToggleWidget,
   onToggleMute,
   onPrev,
   onNext,
@@ -185,24 +191,27 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
           }}
           title={currentTrack ? 'Открыть на весь экран и текст (F)' : undefined}
         >
-          {currentTrack?.coverUrl ? (
-            <img
-              src={currentTrack.coverUrl}
-              alt={currentTrack.title}
-              className="track-mini-cover"
-            />
-          ) : (
-            <div
-              className="track-mini-cover"
-              style={{
-                background: currentTrack
-                  ? getCoverGradient(currentTrack.id)
-                  : 'rgba(255,255,255,0.12)',
-              }}
-            >
-              <Music size={17} />
-            </div>
-          )}
+          {(() => {
+            const coverSrc = resolveCoverSrc(currentTrack?.coverUrl);
+            return coverSrc ? (
+              <img
+                src={coverSrc}
+                alt={currentTrack?.title || 'Обложка'}
+                className="track-mini-cover"
+              />
+            ) : (
+              <div
+                className="track-mini-cover"
+                style={{
+                  background: currentTrack
+                    ? getCoverGradient(currentTrack.id)
+                    : 'rgba(255,255,255,0.12)',
+                }}
+              >
+                <Music size={17} />
+              </div>
+            );
+          })()}
 
           {currentTrack ? (
             <div style={{ minWidth: 0 }}>
@@ -293,6 +302,17 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
       </div>
 
       <div className="player-right">
+        {onToggleWidget && (
+          <button
+            type="button"
+            className={`icon-ghost-btn ${isWidgetOpen ? 'is-active' : ''}`}
+            onClick={onToggleWidget}
+            title="Виджет на рабочий стол (Liquid Glass)"
+          >
+            <PictureInPicture2 size={17} />
+          </button>
+        )}
+
         <button
           type="button"
           className={`icon-ghost-btn ${isLyricsOpen ? 'is-active' : ''}`}

@@ -19,7 +19,7 @@ import {
   X,
   Disc3,
 } from 'lucide-react';
-import { getCoverGradient } from './shared/models';
+import { getCoverGradient, resolveCoverSrc } from './shared/models';
 import { Sidebar, NavTab } from './components/sidebar';
 import { WaveModal } from './components/wave_modal';
 import { TrackList } from './components/track_list';
@@ -161,6 +161,7 @@ export const App: React.FC = () => {
   } | null>(null);
   const [isEqOpen, setIsEqOpen] = useState(false);
   const [isCmdOpen, setIsCmdOpen] = useState(false);
+  const [isWidgetOpen, setIsWidgetOpen] = useState(false);
 
   const [isThemeModalOpen, setIsThemeModalOpen] = useState(false);
   const [isNightMode, setIsNightMode] = useState<boolean>(() => {
@@ -170,9 +171,13 @@ export const App: React.FC = () => {
       return false;
     }
   });
-  const [currentThemeId, setCurrentThemeId] = useState<string>(
-    () => localStorage.getItem('abyss-theme') || 'abyss-violet'
-  );
+  const [currentThemeId, setCurrentThemeId] = useState<string>(() => {
+    try {
+      return localStorage.getItem('abyss-theme') || 'abyss-violet';
+    } catch {
+      return 'abyss-violet';
+    }
+  });
 
   const [currentTrack, setCurrentTrack] = useState<TrackItem | null>(null);
   const [queue, setQueue] = useState<TrackItem[]>([]);
@@ -188,7 +193,10 @@ export const App: React.FC = () => {
   });
 
   const isTransitioningRef = useRef(false);
-  const isFetchingMoreWaveRef = useRef(false);
+  const playSeqRef = useRef(0);
+  const transitionTimerRef = useRef<number | null>(null);
+  const waveFetchPromiseRef = useRef<Promise<TrackItem[]> | null>(null);
+  const waveStartSeqRef = useRef(0);
   const playedWaveIdsRef = useRef<Set<string>>(new Set());
   const bloomRef = useRef<HTMLDivElement>(null);
   const searchCacheRef = useRef(new Map<string, YandexSearchResult>());
@@ -203,7 +211,9 @@ export const App: React.FC = () => {
     root.style.setProperty('--accent-glow', theme.glow);
     root.style.setProperty('--bg-base', theme.bgBase);
     root.style.setProperty('--sidebar-top', theme.sidebarTop);
-    localStorage.setItem('abyss-theme', theme.id);
+    try {
+      localStorage.setItem('abyss-theme', theme.id);
+    } catch {}
   }, [currentThemeId]);
 
   useEffect(() => {
@@ -275,6 +285,7 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     let unlistenAuth: (() => void) | null = null;
+    let disposed = false;
 
     const initData = async () => {
       try {
@@ -283,14 +294,20 @@ export const App: React.FC = () => {
           tauriApi.getPlaylists(),
           tauriApi.getYandexStatus(),
         ]);
+        if (disposed) return;
         setTracks(savedTracks);
         setPlaylists(savedPlaylists);
         setYandexAuth(ymStatus);
 
-        unlistenAuth = await tauriApi.onYandexAuthSuccess((status) => {
+        const fn = await tauriApi.onYandexAuthSuccess((status) => {
           setYandexAuth(status);
           searchCacheRef.current.clear();
         });
+        if (disposed) {
+          fn();
+          return;
+        }
+        unlistenAuth = fn;
       } catch (err) {
         console.error('Ошибка инициализации данных:', err);
       }
@@ -298,6 +315,7 @@ export const App: React.FC = () => {
 
     void initData();
     return () => {
+      disposed = true;
       if (unlistenAuth) unlistenAuth();
     };
   }, []);
@@ -371,33 +389,51 @@ export const App: React.FC = () => {
 
   const fetchNextWaveBatch = useCallback(
     async (anchorTrackId: string, activeSettings: WaveSettings): Promise<TrackItem[]> => {
-      if (isFetchingMoreWaveRef.current) return [];
-      isFetchingMoreWaveRef.current = true;
-      try {
-        const rawBatch = await tauriApi.getYandexWave(activeSettings, anchorTrackId);
-        const fresh = rawBatch.filter((t) => !playedWaveIdsRef.current.has(t.id));
-        const usable = fresh.length > 0 ? fresh : rawBatch;
-
-        if (usable.length > 0) {
-          setWaveBuffer((prev) => {
-            const existingIds = new Set(prev.map((x) => x.id));
-            const uniqueNew = usable.filter((x) => !existingIds.has(x.id));
-            return [...prev, ...uniqueNew];
-          });
-        }
-        return usable;
-      } catch (err) {
-        console.error('Ошибка дозагрузки Моей волны:', err);
-        return [];
-      } finally {
-        isFetchingMoreWaveRef.current = false;
+      if (waveFetchPromiseRef.current) {
+        return waveFetchPromiseRef.current;
       }
+      const promise = (async () => {
+        try {
+          const rawBatch = await tauriApi.getYandexWave(activeSettings, anchorTrackId);
+          const fresh = rawBatch.filter((t) => !playedWaveIdsRef.current.has(t.id));
+          const usable = fresh.length > 0 ? fresh : rawBatch;
+
+          if (usable.length > 0) {
+            setWaveBuffer((prev) => {
+              const existingIds = new Set(prev.map((x) => x.id));
+              const uniqueNew = usable.filter((x) => !existingIds.has(x.id));
+              return [...prev, ...uniqueNew];
+            });
+          }
+          return usable;
+        } catch (err) {
+          console.error('Ошибка дозагрузки Моей волны:', err);
+          return [];
+        } finally {
+          waveFetchPromiseRef.current = null;
+        }
+      })();
+      waveFetchPromiseRef.current = promise;
+      return promise;
     },
     []
   );
 
+  const scheduleTransitionEnd = useCallback((seq: number) => {
+    if (transitionTimerRef.current !== null) {
+      window.clearTimeout(transitionTimerRef.current);
+    }
+    transitionTimerRef.current = window.setTimeout(() => {
+      if (seq === playSeqRef.current) {
+        isTransitioningRef.current = false;
+      }
+      transitionTimerRef.current = null;
+    }, 300);
+  }, []);
+
   const handleSelectTrack = useCallback(
     async (track: TrackItem, customQueue?: TrackItem[], fromWave = false) => {
+      const seq = ++playSeqRef.current;
       isTransitioningRef.current = true;
       try {
         setIsWaveActive(fromWave);
@@ -419,17 +455,20 @@ export const App: React.FC = () => {
           positionSec: 0,
           isFinished: false,
         }));
+        void tauriApi.updateMediaMetadata(track);
         await tauriApi.playTrack(track.id, track.audioUrl);
       } catch (err) {
         console.error('Ошибка воспроизведения:', err);
-        setPlaybackStatus((prev) => ({ ...prev, isPlaying: false }));
+        if (seq === playSeqRef.current) {
+          setPlaybackStatus((prev) => ({ ...prev, isPlaying: false }));
+        }
       } finally {
-        setTimeout(() => {
-          isTransitioningRef.current = false;
-        }, 300);
+        if (seq === playSeqRef.current) {
+          scheduleTransitionEnd(seq);
+        }
       }
     },
-    [waveSettings.genre]
+    [waveSettings.genre, scheduleTransitionEnd]
   );
 
   const handleNextTrack = useCallback(
@@ -444,7 +483,7 @@ export const App: React.FC = () => {
           );
         }
 
-        if (isRepeat && currentTrack) {
+        if (naturalFinish && isRepeat && currentTrack) {
           await handleSelectTrack(currentTrack, undefined, true);
           return;
         }
@@ -471,20 +510,24 @@ export const App: React.FC = () => {
       const activeList = queue.length > 0 ? queue : tracks;
       if (activeList.length === 0) return;
 
-      if (isRepeat && currentTrack) {
+      if (naturalFinish && isRepeat && currentTrack) {
         await handleSelectTrack(currentTrack, activeList, false);
-        return;
-      }
-
-      if (isShuffle) {
-        const randomIndex = Math.floor(Math.random() * activeList.length);
-        await handleSelectTrack(activeList[randomIndex], activeList, false);
         return;
       }
 
       const currentIndex = currentTrack
         ? activeList.findIndex((t) => t.id === currentTrack.id)
         : -1;
+
+      if (isShuffle) {
+        let randomIndex = Math.floor(Math.random() * activeList.length);
+        if (activeList.length > 1 && randomIndex === currentIndex) {
+          randomIndex = (randomIndex + 1 + Math.floor(Math.random() * (activeList.length - 1))) % activeList.length;
+        }
+        await handleSelectTrack(activeList[randomIndex], activeList, false);
+        return;
+      }
+
       const nextIndex = currentIndex + 1;
 
       if (nextIndex < activeList.length) {
@@ -510,8 +553,20 @@ export const App: React.FC = () => {
 
   const handlePrevTrack = useCallback(async () => {
     if (playbackStatus.positionSec > 3 && currentTrack) {
-      await tauriApi.seekTrack(0);
-      setPlaybackStatus((prev) => ({ ...prev, positionSec: 0 }));
+      const seq = ++playSeqRef.current;
+      isTransitioningRef.current = true;
+      try {
+        await tauriApi.seekTrack(0);
+        if (seq === playSeqRef.current) {
+          setPlaybackStatus((prev) => ({ ...prev, positionSec: 0 }));
+        }
+      } catch (err) {
+        console.error('Ошибка перемотки в начало:', err);
+      } finally {
+        if (seq === playSeqRef.current) {
+          scheduleTransitionEnd(seq);
+        }
+      }
       return;
     }
 
@@ -535,26 +590,41 @@ export const App: React.FC = () => {
     queue,
     tracks,
     handleSelectTrack,
+    scheduleTransitionEnd,
   ]);
 
   useEffect(() => {
     if (!currentTrack) return;
+    let cancelled = false;
+    let timerId: number | null = null;
 
-    const interval = setInterval(async () => {
-      if (isTransitioningRef.current) return;
-      try {
-        const status = await tauriApi.getPlaybackStatus();
-        if (isTransitioningRef.current) return;
-        setPlaybackStatus(status);
-        if (status.isFinished && status.positionSec > 1) {
-          await handleNextTrack(true);
+    const poll = async () => {
+      if (cancelled) return;
+      if (!isTransitioningRef.current) {
+        try {
+          const status = await tauriApi.getPlaybackStatus();
+          if (cancelled || isTransitioningRef.current) return;
+          setPlaybackStatus(status);
+          void tauriApi.updateMediaPlayback(status.isPlaying, status.positionSec);
+          if (status.isFinished && status.positionSec > 1) {
+            isTransitioningRef.current = true;
+            await handleNextTrack(true);
+          }
+        } catch (err) {
+          console.error('Ошибка статуса плеера:', err);
         }
-      } catch (err) {
-        console.error('Ошибка статуса плеера:', err);
       }
-    }, 500);
+      if (!cancelled) {
+        timerId = window.setTimeout(poll, 500);
+      }
+    };
 
-    return () => clearInterval(interval);
+    timerId = window.setTimeout(poll, 500);
+
+    return () => {
+      cancelled = true;
+      if (timerId !== null) window.clearTimeout(timerId);
+    };
   }, [currentTrack, handleNextTrack]);
 
   const handleStartWave = useCallback(
@@ -564,10 +634,12 @@ export const App: React.FC = () => {
         return;
       }
 
+      const seq = ++waveStartSeqRef.current;
       const activeSettings = overrideSettings ?? waveSettings;
       setIsLoadingStream(true);
       try {
         const freshBatch = await tauriApi.getYandexWave(activeSettings, null);
+        if (seq !== waveStartSeqRef.current) return;
         if (freshBatch.length > 0) {
           const unseen = freshBatch.filter((t) => !playedWaveIdsRef.current.has(t.id));
           const ordered =
@@ -581,7 +653,9 @@ export const App: React.FC = () => {
       } catch (err) {
         console.error('Ошибка запуска Моей волны Яндекса:', err);
       } finally {
-        setIsLoadingStream(false);
+        if (seq === waveStartSeqRef.current) {
+          setIsLoadingStream(false);
+        }
       }
     },
     [yandexAuth.isAuthorized, waveSettings, handleSelectTrack]
@@ -643,21 +717,26 @@ export const App: React.FC = () => {
       return;
     }
 
+    const seq = ++playSeqRef.current;
     isTransitioningRef.current = true;
     try {
       if (playbackStatus.isPlaying) {
         await tauriApi.pauseTrack();
-        setPlaybackStatus((prev) => ({ ...prev, isPlaying: false }));
+        if (seq === playSeqRef.current) {
+          setPlaybackStatus((prev) => ({ ...prev, isPlaying: false }));
+        }
       } else {
         await tauriApi.resumeTrack();
-        setPlaybackStatus((prev) => ({ ...prev, isPlaying: true }));
+        if (seq === playSeqRef.current) {
+          setPlaybackStatus((prev) => ({ ...prev, isPlaying: true }));
+        }
       }
     } catch (err) {
       console.error('Ошибка паузы/старта:', err);
     } finally {
-      setTimeout(() => {
-        isTransitioningRef.current = false;
-      }, 250);
+      if (seq === playSeqRef.current) {
+        scheduleTransitionEnd(seq);
+      }
     }
   }, [
     currentTrack,
@@ -667,21 +746,29 @@ export const App: React.FC = () => {
     isWaveActive,
     handleSelectTrack,
     handleStartWave,
+    scheduleTransitionEnd,
   ]);
 
-  const handleSeek = useCallback(async (seconds: number) => {
-    isTransitioningRef.current = true;
-    try {
-      await tauriApi.seekTrack(seconds);
-      setPlaybackStatus((prev) => ({ ...prev, positionSec: seconds }));
-    } catch (err) {
-      console.error('Ошибка перемотки:', err);
-    } finally {
-      setTimeout(() => {
-        isTransitioningRef.current = false;
-      }, 250);
-    }
-  }, []);
+  const handleSeek = useCallback(
+    async (seconds: number) => {
+      if (!Number.isFinite(seconds) || seconds < 0) return;
+      const seq = ++playSeqRef.current;
+      isTransitioningRef.current = true;
+      try {
+        await tauriApi.seekTrack(seconds);
+        if (seq === playSeqRef.current) {
+          setPlaybackStatus((prev) => ({ ...prev, positionSec: seconds }));
+        }
+      } catch (err) {
+        console.error('Ошибка перемотки:', err);
+      } finally {
+        if (seq === playSeqRef.current) {
+          scheduleTransitionEnd(seq);
+        }
+      }
+    },
+    [scheduleTransitionEnd]
+  );
 
   const handleVolumeChange = useCallback(async (volume: number) => {
     try {
@@ -863,6 +950,72 @@ export const App: React.FC = () => {
     handleToggleMute,
     handleToggleFavorite,
   ]);
+
+  const mediaHandlersRef = useRef({
+    togglePlay: handleTogglePlay,
+    next: handleNextTrack,
+    prev: handlePrevTrack,
+    seek: handleSeek,
+    isPlaying: playbackStatus.isPlaying,
+  });
+
+  useEffect(() => {
+    mediaHandlersRef.current = {
+      togglePlay: handleTogglePlay,
+      next: handleNextTrack,
+      prev: handlePrevTrack,
+      seek: handleSeek,
+      isPlaying: playbackStatus.isPlaying,
+    };
+  }, [handleTogglePlay, handleNextTrack, handlePrevTrack, handleSeek, playbackStatus.isPlaying]);
+
+  useEffect(() => {
+    let unlistenControl: (() => void) | null = null;
+    let unlistenSeek: (() => void) | null = null;
+    let disposed = false;
+
+    const setupMediaListeners = async () => {
+      try {
+        const fnCtrl = await tauriApi.onMediaControl((action) => {
+          const h = mediaHandlersRef.current;
+          if (action === 'play') {
+            if (!h.isPlaying) void h.togglePlay();
+          } else if (action === 'pause' || action === 'stop') {
+            if (h.isPlaying) void h.togglePlay();
+          } else if (action === 'toggle') {
+            void h.togglePlay();
+          } else if (action === 'next') {
+            void h.next(false);
+          } else if (action === 'previous') {
+            void h.prev();
+          }
+        });
+        if (disposed) {
+          fnCtrl();
+          return;
+        }
+        unlistenControl = fnCtrl;
+
+        const fnSeek = await tauriApi.onMediaSeek((posSec) => {
+          void mediaHandlersRef.current.seek(posSec);
+        });
+        if (disposed) {
+          fnSeek();
+          return;
+        }
+        unlistenSeek = fnSeek;
+      } catch (err) {
+        console.error('Ошибка подписки на медиа-контролы:', err);
+      }
+    };
+
+    void setupMediaListeners();
+    return () => {
+      disposed = true;
+      if (unlistenControl) unlistenControl();
+      if (unlistenSeek) unlistenSeek();
+    };
+  }, []);
 
   // Автоматически восстанавливаем метаданные для старых онлайн-треков в избранном, если они сохранились без названия
   useEffect(() => {
@@ -1074,6 +1227,105 @@ export const App: React.FC = () => {
       ? currentTrack
       : { ...currentTrack, isFavorite: isFav };
   }, [currentTrack, favoriteIds]);
+
+  const activeTheme = useMemo(
+    () => THEME_PRESETS.find((t) => t.id === currentThemeId) || THEME_PRESETS[0],
+    [currentThemeId]
+  );
+
+  const pushWidgetState = useCallback(() => {
+    void tauriApi.emitWidgetState({
+      track: syncedCurrentTrack,
+      isPlaying: playbackStatus.isPlaying,
+      positionSec: playbackStatus.positionSec,
+      isFavorite: Boolean(syncedCurrentTrack?.isFavorite),
+      accentColor: activeTheme.accent,
+      accentSecondary: activeTheme.accent2,
+    });
+  }, [
+    syncedCurrentTrack,
+    playbackStatus.isPlaying,
+    playbackStatus.positionSec,
+    activeTheme.accent,
+    activeTheme.accent2,
+  ]);
+
+  const pushWidgetStateRef = useRef(pushWidgetState);
+  useEffect(() => {
+    pushWidgetStateRef.current = pushWidgetState;
+  }, [pushWidgetState]);
+
+  const toggleFavRef = useRef(handleToggleFavorite);
+  useEffect(() => {
+    toggleFavRef.current = handleToggleFavorite;
+  }, [handleToggleFavorite]);
+
+  useEffect(() => {
+    if (isWidgetOpen) {
+      pushWidgetState();
+    }
+  }, [isWidgetOpen, pushWidgetState]);
+
+  useEffect(() => {
+    let unlistenReq: (() => void) | null = null;
+    let unlistenVis: (() => void) | null = null;
+    let unlistenFav: (() => void) | null = null;
+    let disposed = false;
+
+    const initWidgetListeners = async () => {
+      try {
+        const open = await tauriApi.isDesktopWidgetOpen();
+        if (disposed) return;
+        setIsWidgetOpen(open);
+
+        const fnReq = await tauriApi.onWidgetRequestState(() => {
+          pushWidgetStateRef.current();
+        });
+        if (disposed) {
+          fnReq();
+          return;
+        }
+        unlistenReq = fnReq;
+
+        const fnVis = await tauriApi.onWidgetVisibilityChanged((visible) => {
+          setIsWidgetOpen(visible);
+        });
+        if (disposed) {
+          fnVis();
+          return;
+        }
+        unlistenVis = fnVis;
+
+        const fnFav = await tauriApi.onWidgetToggleFavorite((trackId) => {
+          void toggleFavRef.current(trackId);
+        });
+        if (disposed) {
+          fnFav();
+          return;
+        }
+        unlistenFav = fnFav;
+      } catch (err) {
+        console.error('Ошибка инициализации слушателей виджета:', err);
+      }
+    };
+
+    void initWidgetListeners();
+    return () => {
+      disposed = true;
+      if (unlistenReq) unlistenReq();
+      if (unlistenVis) unlistenVis();
+      if (unlistenFav) unlistenFav();
+    };
+  }, []);
+
+  const handleToggleWidget = useCallback(async () => {
+    try {
+      const open = await tauriApi.toggleDesktopWidget();
+      setIsWidgetOpen(open);
+    } catch (err) {
+      console.error('Ошибка переключения виджета:', err);
+    }
+  }, []);
 
   return (
     <div className="app-shell">
@@ -1444,9 +1696,9 @@ export const App: React.FC = () => {
                     style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))' }}
                   >
                     <div className="recent-card is-playing" style={{ cursor: 'default' }}>
-                      {syncedCurrentTrack.coverUrl ? (
+                      {resolveCoverSrc(syncedCurrentTrack.coverUrl) ? (
                         <img
-                          src={syncedCurrentTrack.coverUrl}
+                          src={resolveCoverSrc(syncedCurrentTrack.coverUrl)!}
                           alt={syncedCurrentTrack.title}
                           className="recent-thumb"
                         />
@@ -1485,9 +1737,9 @@ export const App: React.FC = () => {
                         onClick={() => handleNextTrack(false)}
                         title="Переключить на следующий трек волны"
                       >
-                        {nextWaveTrack.coverUrl ? (
+                        {resolveCoverSrc(nextWaveTrack.coverUrl) ? (
                           <img
-                            src={nextWaveTrack.coverUrl}
+                            src={resolveCoverSrc(nextWaveTrack.coverUrl)!}
                             alt={nextWaveTrack.title}
                             className="recent-thumb"
                           />
@@ -1611,69 +1863,6 @@ export const App: React.FC = () => {
                       Локальная коллекция ({tracks.length})
                     </h2>
                   </div>
-                  {(() => {
-                    const q = searchQuery.trim().toLowerCase();
-                    const ymList = searchArtists.slice(0, 8);
-                    const fallbackList: { id?: string; name: string; coverUrl?: string; tracksCount: number }[] = [];
-                    if (ymList.length === 0) {
-                      const artistMap = new Map<string, { name: string; coverUrl?: string; count: number }>();
-                      displayedTracks.forEach((t) => {
-                        t.artist
-                          .split(',')
-                          .map((s) => s.trim())
-                          .filter(Boolean)
-                          .forEach((name) => {
-                            if (!name.toLowerCase().includes(q)) return;
-                            const ex = artistMap.get(name);
-                            if (ex) {
-                              ex.count += 1;
-                              if (!ex.coverUrl && t.coverUrl) ex.coverUrl = t.coverUrl;
-                            } else {
-                              artistMap.set(name, { name, coverUrl: t.coverUrl, count: 1 });
-                            }
-                          });
-                      });
-                      artistMap.forEach((v) =>
-                        fallbackList.push({ name: v.name, coverUrl: v.coverUrl, tracksCount: v.count })
-                      );
-                    }
-                    const matchedArtists = ymList.length > 0 ? ymList : fallbackList.slice(0, 8);
-                    if (matchedArtists.length === 0) return null;
-                    return (
-                      <div style={{ marginBottom: 22 }}>
-                        <div className="section-header-row">
-                          <h3 className="section-heading shimmer-text" style={{ fontSize: 16 }}>
-                            Исполнители
-                          </h3>
-                        </div>
-                        <div className="entity-cards-row">
-                          {matchedArtists.map((art) => (
-                            <button
-                              key={art.id || art.name}
-                              type="button"
-                              className="entity-card"
-                              onClick={() => openArtistPage(art.name, art.id)}
-                            >
-                              <div
-                                className="entity-card-cover round"
-                                style={{
-                                  background: art.coverUrl
-                                    ? `url(${art.coverUrl}) center/cover no-repeat`
-                                    : getCoverGradient(art.name),
-                                }}
-                              >
-                                {!art.coverUrl && <Music size={26} />}
-                              </div>
-                              <div className="entity-card-title">{art.name}</div>
-                              <div className="entity-card-sub">
-                                {art.tracksCount > 0 ? `${art.tracksCount} треков` : 'Исполнитель'}
-                              </div>
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })()}
                   <TrackList
                     tracks={visibleTracks}
                     currentTrackId={syncedCurrentTrack?.id ?? null}
@@ -1715,17 +1904,30 @@ export const App: React.FC = () => {
               </div>
 
               {visibleTracks.length > 0 ? (
-                <TrackList
-                  tracks={visibleTracks}
-                  currentTrackId={syncedCurrentTrack?.id ?? null}
-                  isPlaying={playbackStatus.isPlaying}
-                  onSelectTrack={(track) =>
-                    handleSelectTrack(track, displayedTracks, false)
-                  }
-                  onToggleFavorite={handleToggleFavorite}
-                  onSelectArtist={openArtistPage}
-                  onSelectAlbum={openAlbumPage}
-                />
+                <>
+                  <TrackList
+                    tracks={visibleTracks}
+                    currentTrackId={syncedCurrentTrack?.id ?? null}
+                    isPlaying={playbackStatus.isPlaying}
+                    onSelectTrack={(track) =>
+                      handleSelectTrack(track, displayedTracks, false)
+                    }
+                    onToggleFavorite={handleToggleFavorite}
+                    onSelectArtist={openArtistPage}
+                    onSelectAlbum={openAlbumPage}
+                  />
+                  {displayedTracks.length > renderLimit && (
+                    <div style={{ display: 'flex', justifyContent: 'center', marginTop: 20 }}>
+                      <button
+                        type="button"
+                        className="wave-settings-btn"
+                        onClick={() => setRenderLimit((l) => l + 40)}
+                      >
+                        Показать ещё ({displayedTracks.length - renderLimit})
+                      </button>
+                    </div>
+                  )}
+                </>
               ) : (
                 <div style={{ marginTop: 28 }} className="empty-box">
                   <Heart size={32} />
@@ -1756,17 +1958,30 @@ export const App: React.FC = () => {
               </div>
 
               {visibleTracks.length > 0 ? (
-                <TrackList
-                  tracks={visibleTracks}
-                  currentTrackId={syncedCurrentTrack?.id ?? null}
-                  isPlaying={playbackStatus.isPlaying}
-                  onSelectTrack={(track) =>
-                    handleSelectTrack(track, displayedTracks, false)
-                  }
-                  onToggleFavorite={handleToggleFavorite}
-                  onSelectArtist={openArtistPage}
-                  onSelectAlbum={openAlbumPage}
-                />
+                <>
+                  <TrackList
+                    tracks={visibleTracks}
+                    currentTrackId={syncedCurrentTrack?.id ?? null}
+                    isPlaying={playbackStatus.isPlaying}
+                    onSelectTrack={(track) =>
+                      handleSelectTrack(track, displayedTracks, false)
+                    }
+                    onToggleFavorite={handleToggleFavorite}
+                    onSelectArtist={openArtistPage}
+                    onSelectAlbum={openAlbumPage}
+                  />
+                  {displayedTracks.length > renderLimit && (
+                    <div style={{ display: 'flex', justifyContent: 'center', marginTop: 20 }}>
+                      <button
+                        type="button"
+                        className="wave-settings-btn"
+                        onClick={() => setRenderLimit((l) => l + 40)}
+                      >
+                        Показать ещё ({displayedTracks.length - renderLimit})
+                      </button>
+                    </div>
+                  )}
+                </>
               ) : (
                 <div style={{ marginTop: 28 }} className="empty-box">
                   <Music size={32} />
@@ -1800,9 +2015,9 @@ export const App: React.FC = () => {
 
           {syncedCurrentTrack && (
             <div className="queue-now-card">
-              {syncedCurrentTrack.coverUrl ? (
+              {resolveCoverSrc(syncedCurrentTrack.coverUrl) ? (
                 <img
-                  src={syncedCurrentTrack.coverUrl}
+                  src={resolveCoverSrc(syncedCurrentTrack.coverUrl)!}
                   alt={syncedCurrentTrack.title}
                   className="queue-big-art"
                 />
@@ -1841,9 +2056,9 @@ export const App: React.FC = () => {
                         : handleSelectTrack(track, activeQueue, false)
                     }
                   >
-                    {track.coverUrl ? (
+                    {resolveCoverSrc(track.coverUrl) ? (
                       <img
-                        src={track.coverUrl}
+                        src={resolveCoverSrc(track.coverUrl)!}
                         alt={track.title}
                         className="track-mini-cover"
                         loading="lazy"
@@ -1876,6 +2091,7 @@ export const App: React.FC = () => {
         isQueueOpen={isQueueOpen}
         isEqOpen={isEqOpen}
         isLyricsOpen={isNowPlayingOpen}
+        isWidgetOpen={isWidgetOpen}
         isMuted={playbackStatus.isMuted}
         positionSec={playbackStatus.positionSec}
         volume={playbackStatus.volume}
@@ -1884,6 +2100,7 @@ export const App: React.FC = () => {
         onToggleRepeat={() => setIsRepeat((r) => !r)}
         onToggleQueue={() => setIsQueueOpen((q) => !q)}
         onToggleEq={() => setIsEqOpen((eq) => !eq)}
+        onToggleWidget={handleToggleWidget}
         onToggleMute={handleToggleMute}
         onPrev={handlePrevTrack}
         onNext={() => handleNextTrack(false)}

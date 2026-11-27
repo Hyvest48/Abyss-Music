@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { emit, listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { PlaybackStatus, PlaylistItem, TrackItem, WaveSettings } from '../shared/models';
 
@@ -114,6 +114,48 @@ export const tauriApi = {
   pauseTrack: (): Promise<void> => invoke('pause_track'),
 
   resumeTrack: (): Promise<void> => invoke('resume_track'),
+
+  updateMediaMetadata: (track: TrackItem): Promise<void> =>
+    invoke('update_media_metadata', {
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      coverUrl: track.coverUrl ?? null,
+      durationSeconds: track.durationSeconds,
+    }),
+
+  updateMediaPlayback: (isPlaying: boolean, positionSec: number): Promise<void> =>
+    invoke('update_media_playback', { isPlaying, positionSec }),
+
+  onMediaControl: (callback: (action: string) => void) =>
+    listen<string>('media-control', (event) => callback(event.payload)),
+
+  onMediaSeek: (callback: (positionSec: number) => void) =>
+    listen<number>('media-seek', (event) => callback(event.payload)),
+
+  toggleDesktopWidget: (): Promise<boolean> =>
+    invoke<boolean>('toggle_desktop_widget'),
+
+  isDesktopWidgetOpen: (): Promise<boolean> =>
+    invoke<boolean>('is_desktop_widget_open'),
+
+  emitWidgetState: (payload: {
+    track: TrackItem | null;
+    isPlaying: boolean;
+    positionSec: number;
+    isFavorite: boolean;
+    accentColor?: string;
+    accentSecondary?: string;
+  }): Promise<void> => emit('widget-state-update', payload),
+
+  onWidgetRequestState: (callback: () => void) =>
+    listen('widget-request-state', () => callback()),
+
+  onWidgetVisibilityChanged: (callback: (open: boolean) => void) =>
+    listen<boolean>('widget-visibility-changed', (event) => callback(event.payload)),
+
+  onWidgetToggleFavorite: (callback: (trackId: string) => void) =>
+    listen<string>('widget-toggle-favorite', (event) => callback(event.payload)),
 
   seekTrack: (seconds: number): Promise<void> => invoke('seek_track', { seconds }),
 
