@@ -33,6 +33,7 @@ export interface WaveSettings {
   activity: string | null;
   character: string | null;
   genre: string | null;
+  language: string | null;
 }
 
 const COVER_GRADIENTS = [
@@ -72,4 +73,5 @@ export const WAVE_CATEGORIES = {
   activity: ['Для фокуса', 'В дорогу', 'Тренировка', 'Вечерний чилл', 'Ночью', 'Для кода'],
   character: ['Любимое', 'Незнакомое', 'Популярное', 'Новинки'],
   genre: ['Рок', 'Инди', 'Электроника', 'Хип-хоп', 'Лоу-фай', 'Акустика'],
+  language: ['Русский', 'Английский', 'Без слов', 'Любой'],
 } as const;

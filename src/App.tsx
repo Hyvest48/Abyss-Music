@@ -18,6 +18,8 @@ import {
   SkipForward,
   X,
   Disc3,
+  History,
+  Flame,
 } from 'lucide-react';
 import { getCoverGradient, resolveCoverSrc } from './shared/models';
 import { Sidebar, NavTab } from './components/sidebar';
@@ -32,6 +34,7 @@ import { EqualizerModal } from './components/equalizer_modal';
 import { ArtistView } from './components/artist_view';
 import { ArtistLinks } from './components/artist_links';
 import { SplashScreen } from './components/splash_screen';
+import { PlaylistPickerModal } from './components/playlist_picker_modal';
 import { THEME_PRESETS, ThemePreset } from './shared/themes';
 import {
   PlaybackStatus,
@@ -153,6 +156,7 @@ export const App: React.FC = () => {
     activity: null,
     character: null,
     genre: null,
+    language: null,
   });
   const [isWaveModalOpen, setIsWaveModalOpen] = useState(false);
 
@@ -184,6 +188,10 @@ export const App: React.FC = () => {
 
   const [currentTrack, setCurrentTrack] = useState<TrackItem | null>(null);
   const [queue, setQueue] = useState<TrackItem[]>([]);
+  const [recentTracks, setRecentTracks] = useState<TrackItem[]>([]);
+  const [topTracks, setTopTracks] = useState<TrackItem[]>([]);
+  const [activePlaylistTracks, setActivePlaylistTracks] = useState<TrackItem[] | null>(null);
+  const [pickerTrack, setPickerTrack] = useState<TrackItem | null>(null);
   const [isShuffle, setIsShuffle] = useState(false);
   const [isRepeat, setIsRepeat] = useState(false);
   const [isQueueOpen, setIsQueueOpen] = useState(false);
@@ -196,6 +204,9 @@ export const App: React.FC = () => {
   });
 
   const isTransitioningRef = useRef(false);
+  const hasLoadedAudioRef = useRef(false);
+  const restoredSeekSecRef = useRef(0);
+  const queueLoadedRef = useRef(false);
   const playSeqRef = useRef(0);
   const transitionTimerRef = useRef<number | null>(null);
   const waveFetchPromiseRef = useRef<Promise<TrackItem[]> | null>(null);
@@ -286,6 +297,17 @@ export const App: React.FC = () => {
     };
   }, []);
 
+  const refreshHistoryStats = useCallback(async () => {
+    try {
+      const [recent, top] = await Promise.all([
+        tauriApi.getRecentTracks(12),
+        tauriApi.getTopTracks(12),
+      ]);
+      setRecentTracks(recent);
+      setTopTracks(top);
+    } catch {}
+  }, []);
+
   useEffect(() => {
     let unlistenAuth: (() => void) | null = null;
     let disposed = false;
@@ -293,15 +315,50 @@ export const App: React.FC = () => {
     const initData = async () => {
       try {
         setSplashStatus('Загрузка медиатеки и профиля...');
-        const [savedTracks, savedPlaylists, ymStatus] = await Promise.all([
-          tauriApi.getTracks(),
-          tauriApi.getPlaylists(),
-          tauriApi.getYandexStatus(),
-        ]);
+        const [savedTracks, savedPlaylists, ymStatus, recent, top, savedQueue] =
+          await Promise.all([
+            tauriApi.getTracks(),
+            tauriApi.getPlaylists(),
+            tauriApi.getYandexStatus(),
+            tauriApi.getRecentTracks(12).catch(() => [] as TrackItem[]),
+            tauriApi.getTopTracks(12).catch(() => [] as TrackItem[]),
+            tauriApi.loadQueueState().catch(() => null),
+          ]);
         if (disposed) return;
         setTracks(savedTracks);
         setPlaylists(savedPlaylists);
         setYandexAuth(ymStatus);
+        setRecentTracks(recent);
+        setTopTracks(top);
+
+        if (savedQueue) {
+          const restoredQueue =
+            savedQueue.queueTracks && savedQueue.queueTracks.length > 0
+              ? savedQueue.queueTracks
+              : savedQueue.trackIds
+                  .map((id) => savedTracks.find((t) => t.id === id))
+                  .filter((t): t is TrackItem => Boolean(t));
+          if (restoredQueue.length > 0) {
+            setQueue(restoredQueue);
+          }
+          const restoredCurrent = savedQueue.currentTrackId
+            ? restoredQueue.find((t) => t.id === savedQueue.currentTrackId) ||
+              savedTracks.find((t) => t.id === savedQueue.currentTrackId) ||
+              null
+            : null;
+          if (restoredCurrent) {
+            hasLoadedAudioRef.current = false;
+            restoredSeekSecRef.current = savedQueue.positionSec || 0;
+            setCurrentTrack(restoredCurrent);
+            setPlaybackStatus((prev) => ({
+              ...prev,
+              isPlaying: false,
+              positionSec: savedQueue.positionSec || 0,
+            }));
+          }
+        }
+        queueLoadedRef.current = true;
+
         setSplashStatus(
           ymStatus.isAuthorized
             ? `Добро пожаловать, ${ymStatus.accountName || 'слушатель'}`
@@ -320,6 +377,7 @@ export const App: React.FC = () => {
       } catch (err) {
         console.error('Ошибка инициализации данных:', err);
         setSplashStatus('Готово');
+        queueLoadedRef.current = true;
       } finally {
         if (!disposed) setIsAppReady(true);
       }
@@ -444,9 +502,16 @@ export const App: React.FC = () => {
   }, []);
 
   const handleSelectTrack = useCallback(
-    async (track: TrackItem, customQueue?: TrackItem[], fromWave = false) => {
+    async (
+      track: TrackItem,
+      customQueue?: TrackItem[],
+      fromWave = false,
+      seekToSec = 0
+    ) => {
       const seq = ++playSeqRef.current;
       isTransitioningRef.current = true;
+      hasLoadedAudioRef.current = true;
+      restoredSeekSecRef.current = 0;
       try {
         setIsWaveActive(fromWave);
         if (fromWave) {
@@ -464,11 +529,15 @@ export const App: React.FC = () => {
         setPlaybackStatus((prev) => ({
           ...prev,
           isPlaying: true,
-          positionSec: 0,
+          positionSec: seekToSec,
           isFinished: false,
         }));
         void tauriApi.updateMediaMetadata(track);
-        await tauriApi.playTrack(track.id, track.audioUrl);
+        await tauriApi.playTrack(track.id, track.audioUrl, track);
+        if (seekToSec > 0 && seq === playSeqRef.current) {
+          await tauriApi.seekTrack(seekToSec);
+        }
+        void refreshHistoryStats();
       } catch (err) {
         console.error('Ошибка воспроизведения:', err);
         if (seq === playSeqRef.current) {
@@ -480,7 +549,7 @@ export const App: React.FC = () => {
         }
       }
     },
-    [waveSettings.genre, scheduleTransitionEnd]
+    [waveSettings.genre, scheduleTransitionEnd, refreshHistoryStats]
   );
 
   const handleNextTrack = useCallback(
@@ -681,6 +750,21 @@ export const App: React.FC = () => {
     }
   }, [isWaveActive, currentTrack, waveBuffer, waveSettings, fetchNextWaveBatch]);
 
+  // Фоново подгружаем следующий трек в кэш, чтобы переключение было мгновенным
+  useEffect(() => {
+    if (!currentTrack || !playbackStatus.isPlaying) return;
+    const list = isWaveActive ? waveBuffer : queue.length > 0 ? queue : tracks;
+    const idx = list.findIndex((t) => t.id === currentTrack.id);
+    if (idx === -1 || idx + 1 >= list.length) return;
+    const nextTrack = list[idx + 1];
+    if (!nextTrack || nextTrack.sourceType === 'local') return;
+
+    const timer = window.setTimeout(() => {
+      void tauriApi.prefetchTrack(nextTrack.audioUrl).catch(() => {});
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [currentTrack?.id, playbackStatus.isPlaying, isWaveActive, waveBuffer, queue, tracks]);
+
   const handlePickAndScanFolder = async () => {
     try {
       const scanned = await tauriApi.pickAndScanFolder();
@@ -724,8 +808,14 @@ export const App: React.FC = () => {
       return;
     }
 
-    if (playbackStatus.isFinished) {
-      await handleSelectTrack(currentTrack, undefined, isWaveActive);
+    if (!hasLoadedAudioRef.current || playbackStatus.isFinished) {
+      const seekSec = !hasLoadedAudioRef.current ? restoredSeekSecRef.current : 0;
+      await handleSelectTrack(
+        currentTrack,
+        queue.length > 0 ? queue : undefined,
+        isWaveActive,
+        seekSec
+      );
       return;
     }
 
@@ -753,6 +843,7 @@ export const App: React.FC = () => {
   }, [
     currentTrack,
     tracks,
+    queue,
     playbackStatus.isPlaying,
     playbackStatus.isFinished,
     isWaveActive,
@@ -910,6 +1001,123 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleAddTrackToPlaylist = useCallback(
+    async (playlistId: string, track: TrackItem) => {
+      setPlaylists((prev) =>
+        prev.map((pl) =>
+          pl.id === playlistId && !pl.trackIds.includes(track.id)
+            ? { ...pl, trackIds: [...pl.trackIds, track.id] }
+            : pl
+        )
+      );
+      if (activeTab === 'playlist' && activePlaylistId === playlistId) {
+        setActivePlaylistTracks((prev) =>
+          prev && !prev.some((t) => t.id === track.id) ? [...prev, track] : prev
+        );
+      }
+      try {
+        await tauriApi.addTrackToPlaylist(playlistId, track.id, track);
+      } catch (err) {
+        console.error('Ошибка добавления трека в плейлист:', err);
+      }
+    },
+    [activeTab, activePlaylistId]
+  );
+
+  const handleCreatePlaylistAndAdd = useCallback(
+    async (name: string, track: TrackItem) => {
+      const id = `pl-${Date.now()}`;
+      try {
+        const created = await tauriApi.createPlaylist(id, name);
+        await tauriApi.addTrackToPlaylist(created.id, track.id, track);
+        setPlaylists((prev) => [...prev, { ...created, trackIds: [track.id] }]);
+      } catch (err) {
+        console.error('Ошибка создания плейлиста с треком:', err);
+      }
+    },
+    []
+  );
+
+  const handleRemoveTrackFromPlaylist = useCallback(
+    async (playlistId: string, trackId: string) => {
+      setPlaylists((prev) =>
+        prev.map((pl) =>
+          pl.id === playlistId
+            ? { ...pl, trackIds: pl.trackIds.filter((id) => id !== trackId) }
+            : pl
+        )
+      );
+      if (activeTab === 'playlist' && activePlaylistId === playlistId) {
+        setActivePlaylistTracks((prev) =>
+          prev ? prev.filter((t) => t.id !== trackId) : prev
+        );
+      }
+      try {
+        await tauriApi.removeTrackFromPlaylist(playlistId, trackId);
+      } catch (err) {
+        console.error('Ошибка удаления трека из плейлиста:', err);
+      }
+    },
+    [activeTab, activePlaylistId]
+  );
+
+  useEffect(() => {
+    if (activeTab !== 'playlist' || !activePlaylistId) {
+      setActivePlaylistTracks(null);
+      return;
+    }
+    let cancelled = false;
+    tauriApi
+      .getPlaylistTracks(activePlaylistId)
+      .then((list) => {
+        if (!cancelled) setActivePlaylistTracks(list);
+      })
+      .catch(() => {
+        if (!cancelled) setActivePlaylistTracks(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, activePlaylistId]);
+
+  const queuePositionRef = useRef(0);
+  queuePositionRef.current = playbackStatus.positionSec;
+
+  // Сохраняем очередь и текущий трек в SQLite при переключении трека или очереди
+  useEffect(() => {
+    if (!queueLoadedRef.current) return;
+    const timer = window.setTimeout(() => {
+      const activeList = queue.length > 0 ? queue : [];
+      void tauriApi
+        .saveQueueState({
+          trackIds: activeList.map((t) => t.id),
+          currentTrackId: currentTrack?.id ?? null,
+          positionSec: Math.floor(queuePositionRef.current),
+          queueTracks: activeList,
+        })
+        .catch(() => {});
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [queue, currentTrack?.id]);
+
+  // Периодически сохраняем позицию воспроизведения раз в 5 секунд
+  useEffect(() => {
+    if (!playbackStatus.isPlaying || !currentTrack) return;
+    const interval = window.setInterval(() => {
+      if (!queueLoadedRef.current) return;
+      const activeList = queue.length > 0 ? queue : [];
+      void tauriApi
+        .saveQueueState({
+          trackIds: activeList.map((t) => t.id),
+          currentTrackId: currentTrack.id,
+          positionSec: Math.floor(queuePositionRef.current),
+          queueTracks: activeList,
+        })
+        .catch(() => {});
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [playbackStatus.isPlaying, currentTrack, queue]);
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -927,6 +1135,7 @@ export const App: React.FC = () => {
         setIsWaveModalOpen(false);
         setIsThemeModalOpen(false);
         setIsEqOpen(false);
+        setPickerTrack(null);
         return;
       }
 
@@ -1088,9 +1297,19 @@ export const App: React.FC = () => {
         map.set(t.id, { ...t, isFavorite: true });
       }
     });
+    recentTracks.forEach((t) => {
+      if (!map.has(t.id)) {
+        map.set(t.id, favoriteIds.has(t.id) ? { ...t, isFavorite: true } : t);
+      }
+    });
+    topTracks.forEach((t) => {
+      if (!map.has(t.id)) {
+        map.set(t.id, favoriteIds.has(t.id) ? { ...t, isFavorite: true } : t);
+      }
+    });
 
     return Array.from(map.values());
-  }, [tracks, waveBuffer, searchResults, savedOnlineFavs, favoriteIds]);
+  }, [tracks, waveBuffer, searchResults, savedOnlineFavs, recentTracks, topTracks, favoriteIds]);
 
   useEffect(() => {
     allTracksRef.current = allAvailableTracks;
@@ -1184,7 +1403,14 @@ export const App: React.FC = () => {
     if (activeTab === 'playlist' && activePlaylistId) {
       const pl = playlists.find((p) => p.id === activePlaylistId);
       if (!pl) return [];
-      return allAvailableTracks.filter((t) => pl.trackIds.includes(t.id));
+      const map = new Map<string, TrackItem>();
+      (activePlaylistTracks ?? []).forEach((t) => map.set(t.id, applyFav(t)));
+      allAvailableTracks.forEach((t) => {
+        if (pl.trackIds.includes(t.id) && !map.has(t.id)) {
+          map.set(t.id, applyFav(t));
+        }
+      });
+      return Array.from(map.values());
     }
 
     return tracks.map(applyFav);
@@ -1196,6 +1422,7 @@ export const App: React.FC = () => {
     searchResults,
     activeTab,
     activePlaylistId,
+    activePlaylistTracks,
     playlists,
     allAvailableTracks,
   ]);
@@ -1217,6 +1444,7 @@ export const App: React.FC = () => {
     waveSettings.activity,
     waveSettings.character,
     waveSettings.genre,
+    waveSettings.language,
   ].filter(Boolean) as string[];
 
   const activePlaylist = playlists.find((p) => p.id === activePlaylistId) || null;
@@ -1418,6 +1646,7 @@ export const App: React.FC = () => {
                 handleSelectTrack(track, artistQueue, false)
               }
               onToggleFavorite={handleToggleFavorite}
+              onAddToPlaylist={setPickerTrack}
               onOpenArtist={openArtistPage}
             />
           ) : selectedEntity?.type === 'album' && albumEntityData ? (
@@ -1478,6 +1707,7 @@ export const App: React.FC = () => {
                   isPlaying={playbackStatus.isPlaying}
                   onSelectTrack={(t) => handleSelectTrack(t, albumEntityData.tracks)}
                   onToggleFavorite={handleToggleFavorite}
+                  onAddToPlaylist={setPickerTrack}
                   onSelectArtist={openArtistPage}
                   onSelectAlbum={openAlbumPage}
                 />
@@ -1577,6 +1807,7 @@ export const App: React.FC = () => {
                       handleSelectTrack(track, displayedTracks, false)
                     }
                     onToggleFavorite={handleToggleFavorite}
+                    onAddToPlaylist={setPickerTrack}
                     onSelectArtist={openArtistPage}
                     onSelectAlbum={openAlbumPage}
                   />
@@ -1807,6 +2038,75 @@ export const App: React.FC = () => {
                 </div>
               )}
 
+              {recentTracks.length > 0 && (
+                <div style={{ marginTop: 28 }}>
+                  <div className="section-header-row">
+                    <h2
+                      className="section-heading shimmer-text"
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}
+                    >
+                      <History size={19} style={{ color: 'var(--accent-warm)' }} />
+                      Недавно слушали
+                    </h2>
+                  </div>
+                  <div className="recent-grid">
+                    {recentTracks.slice(0, 8).map((tr) => {
+                      const isCur = syncedCurrentTrack?.id === tr.id;
+                      const src = resolveCoverSrc(tr.coverUrl);
+                      return (
+                        <button
+                          key={`recent-${tr.id}`}
+                          type="button"
+                          className={`recent-card ${isCur ? 'is-playing' : ''}`}
+                          onClick={() => handleSelectTrack(tr, recentTracks, false)}
+                        >
+                          {src ? (
+                            <img src={src} alt={tr.title} className="recent-thumb" loading="lazy" />
+                          ) : (
+                            <div
+                              className="recent-thumb"
+                              style={{ background: getCoverGradient(tr.id) }}
+                            >
+                              <Music size={17} />
+                            </div>
+                          )}
+                          <div className="recent-card-text">
+                            <span className="recent-card-title shimmer-text">{tr.title}</span>
+                            <span className="recent-card-artist">{tr.artist}</span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {topTracks.length > 0 && (
+                <div style={{ marginTop: 28 }}>
+                  <div className="section-header-row">
+                    <h2
+                      className="section-heading shimmer-text"
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}
+                    >
+                      <Flame size={19} style={{ color: 'var(--accent-warm)' }} />
+                      Топ треков
+                    </h2>
+                  </div>
+                  <TrackList
+                    tracks={topTracks.slice(0, 10).map((t) =>
+                      favoriteIds.has(t.id) ? { ...t, isFavorite: true } : t
+                    )}
+                    currentTrackId={syncedCurrentTrack?.id ?? null}
+                    isPlaying={playbackStatus.isPlaying}
+                    onSelectTrack={(track) => handleSelectTrack(track, topTracks, false)}
+                    onToggleFavorite={handleToggleFavorite}
+                    onAddToPlaylist={setPickerTrack}
+                    onSelectArtist={openArtistPage}
+                    onSelectAlbum={openAlbumPage}
+                  />
+                </div>
+              )}
+
               {homeArtists.length > 0 && (
                 <div style={{ marginTop: 28 }}>
                   <div className="section-header-row">
@@ -1884,6 +2184,7 @@ export const App: React.FC = () => {
                       handleSelectTrack(track, displayedTracks, false)
                     }
                     onToggleFavorite={handleToggleFavorite}
+                    onAddToPlaylist={setPickerTrack}
                     onSelectArtist={openArtistPage}
                     onSelectAlbum={openAlbumPage}
                   />
@@ -1926,6 +2227,7 @@ export const App: React.FC = () => {
                       handleSelectTrack(track, displayedTracks, false)
                     }
                     onToggleFavorite={handleToggleFavorite}
+                    onAddToPlaylist={setPickerTrack}
                     onSelectArtist={openArtistPage}
                     onSelectAlbum={openAlbumPage}
                   />
@@ -1980,6 +2282,10 @@ export const App: React.FC = () => {
                       handleSelectTrack(track, displayedTracks, false)
                     }
                     onToggleFavorite={handleToggleFavorite}
+                    onAddToPlaylist={setPickerTrack}
+                    onRemoveFromPlaylist={(track) =>
+                      handleRemoveTrackFromPlaylist(activePlaylist.id, track.id)
+                    }
                     onSelectArtist={openArtistPage}
                     onSelectAlbum={openAlbumPage}
                   />
@@ -2192,6 +2498,14 @@ export const App: React.FC = () => {
           setSelectedEntity(null);
           setActiveTab(tab);
         }}
+      />
+
+      <PlaylistPickerModal
+        track={pickerTrack}
+        playlists={playlists}
+        onClose={() => setPickerTrack(null)}
+        onAddTrack={handleAddTrackToPlaylist}
+        onCreateAndAdd={handleCreatePlaylistAndAdd}
       />
     </div>
   );

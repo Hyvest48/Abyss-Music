@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Heart, Music, Clock, Play } from 'lucide-react';
+import { Heart, Music, Clock, Play, ListPlus, Trash2 } from 'lucide-react';
 import { TrackItem, getCoverGradient, resolveCoverSrc } from '../shared/models';
 
 interface TrackListProps {
@@ -8,6 +8,8 @@ interface TrackListProps {
   isPlaying: boolean;
   onSelectTrack: (track: TrackItem) => void;
   onToggleFavorite: (trackId: string, track?: TrackItem) => void;
+  onAddToPlaylist?: (track: TrackItem) => void;
+  onRemoveFromPlaylist?: (track: TrackItem) => void;
   onSelectArtist?: (artistName: string) => void;
   onSelectAlbum?: (albumName: string) => void;
 }
@@ -57,6 +59,8 @@ export const TrackList: React.FC<TrackListProps> = React.memo(({
   isPlaying,
   onSelectTrack,
   onToggleFavorite,
+  onAddToPlaylist,
+  onRemoveFromPlaylist,
   onSelectArtist,
   onSelectAlbum,
 }) => {
@@ -106,7 +110,7 @@ export const TrackList: React.FC<TrackListProps> = React.memo(({
           <th style={{ width: 72 }}>
             <Clock size={14} />
           </th>
-          <th style={{ width: 48 }} />
+          <th style={{ width: onAddToPlaylist || onRemoveFromPlaylist ? 92 : 48 }} />
         </tr>
       </thead>
       <tbody>
@@ -184,17 +188,40 @@ export const TrackList: React.FC<TrackListProps> = React.memo(({
               <td className="tabular-time">{formatDuration(track.durationSeconds)}</td>
 
               <td onClick={(e) => e.stopPropagation()}>
-                <button
-                  type="button"
-                  className="icon-ghost-btn"
-                  onClick={() => onToggleFavorite(track.id, track)}
-                >
-                  <Heart
-                    size={16}
-                    fill={track.isFavorite ? '#ffffff' : 'none'}
-                    color="#ffffff"
-                  />
-                </button>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 6 }}>
+                  {onAddToPlaylist && (
+                    <button
+                      type="button"
+                      className="icon-ghost-btn"
+                      onClick={() => onAddToPlaylist(track)}
+                      title="Добавить в плейлист"
+                    >
+                      <ListPlus size={16} />
+                    </button>
+                  )}
+                  {onRemoveFromPlaylist && (
+                    <button
+                      type="button"
+                      className="icon-ghost-btn"
+                      onClick={() => onRemoveFromPlaylist(track)}
+                      title="Убрать из плейлиста"
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="icon-ghost-btn"
+                    onClick={() => onToggleFavorite(track.id, track)}
+                    title={track.isFavorite ? 'Убрать из избранного' : 'В избранное'}
+                  >
+                    <Heart
+                      size={16}
+                      fill={track.isFavorite ? '#ffffff' : 'none'}
+                      color="#ffffff"
+                    />
+                  </button>
+                </div>
               </td>
             </tr>
           );

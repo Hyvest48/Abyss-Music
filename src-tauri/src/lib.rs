@@ -1,5 +1,6 @@
 mod audio;
 mod db;
+mod global_hotkeys;
 mod media_controls;
 mod models;
 mod providers;
@@ -9,6 +10,8 @@ use std::sync::Mutex;
 use rusqlite::Connection;
 use serde::Serialize;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::menu::{Menu, MenuItem};
 use audio::AudioPlayer;
 use media_controls::MediaControlsManager;
 use models::{PlaybackStatus, PlaylistItem, TrackItem};
@@ -302,6 +305,7 @@ async fn get_yandex_wave(
     activity: Option<String>,
     character: Option<String>,
     genre: Option<String>,
+    language: Option<String>,
     queue_track_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Vec<TrackItem>, String> {
@@ -316,6 +320,7 @@ async fn get_yandex_wave(
             activity.as_deref(),
             character.as_deref(),
             genre.as_deref(),
+            language.as_deref(),
             queue_track_id.as_deref(),
         )
     })
@@ -403,13 +408,66 @@ fn get_eq_gains(state: State<AppState>) -> Result<Vec<f32>, String> {
 }
 
 #[tauri::command]
+fn set_crossfade_ms(ms: u32, state: State<AppState>) -> Result<(), String> {
+    let clamped = ms.min(8000);
+    {
+        let player = state.player.lock().map_err(|e| e.to_string())?;
+        player.set_crossfade_ms(clamped);
+    }
+    if let Ok(conn) = state.db.lock() {
+        let _ = db::set_setting(&conn, "crossfade_ms", &clamped.to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_crossfade_ms(state: State<AppState>) -> Result<u32, String> {
+    let player = state.player.lock().map_err(|e| e.to_string())?;
+    Ok(player.get_crossfade_ms())
+}
+
+#[tauri::command]
+fn get_audio_cache_size_mb(state: State<AppState>) -> Result<f64, String> {
+    let dir = {
+        let player = state.player.lock().map_err(|e| e.to_string())?;
+        player.cache_dir().to_path_buf()
+    };
+    let bytes = audio::get_cache_size_bytes(&dir);
+    Ok((bytes as f64) / (1024.0 * 1024.0))
+}
+
+#[tauri::command]
+fn clear_audio_cache(state: State<AppState>) -> Result<(), String> {
+    let dir = {
+        let player = state.player.lock().map_err(|e| e.to_string())?;
+        player.cache_dir().to_path_buf()
+    };
+    audio::clear_cache_dir(&dir)
+}
+
+#[tauri::command]
+fn prefetch_track(audio_url: String, state: State<AppState>) -> Result<(), String> {
+    let ym_token = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::get_setting(&conn, "yandex_token")?
+    };
+    let player = state.player.lock().map_err(|e| e.to_string())?;
+    player.prefetch_track(&audio_url, ym_token.as_deref());
+    Ok(())
+}
+
+#[tauri::command]
 async fn play_track(
     track_id: String,
     audio_url: String,
+    track: Option<TrackItem>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let ym_token = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
+        if let Some(ref tr) = track {
+            let _ = db::upsert_single_track(&conn, tr);
+        }
         let _ = db::record_play(&conn, &track_id);
         db::get_setting(&conn, "yandex_token")?
     };
@@ -648,10 +706,30 @@ fn create_playlist(id: String, name: String, state: State<AppState>) -> Result<P
 fn add_track_to_playlist(
     playlist_id: String,
     track_id: String,
+    track: Option<TrackItem>,
     state: State<AppState>,
 ) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    if let Some(ref tr) = track {
+        let _ = db::upsert_single_track(&conn, tr);
+    }
     db::add_track_to_playlist(&conn, &playlist_id, &track_id)
+}
+
+#[tauri::command]
+fn remove_track_from_playlist(
+    playlist_id: String,
+    track_id: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::remove_track_from_playlist(&conn, &playlist_id, &track_id)
+}
+
+#[tauri::command]
+fn get_playlist_tracks(playlist_id: String, state: State<AppState>) -> Result<Vec<TrackItem>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::get_playlist_tracks(&conn, &playlist_id)
 }
 
 #[tauri::command]
@@ -666,19 +744,77 @@ fn delete_playlist(id: String, state: State<AppState>) -> Result<(), String> {
     db::delete_playlist(&mut conn, &id)
 }
 
+// ─── История прослушиваний ───────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_recent_tracks(limit: Option<usize>, state: State<AppState>) -> Result<Vec<TrackItem>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::get_recent_tracks(&conn, limit.unwrap_or(20))
+}
+
+#[tauri::command]
+fn get_top_tracks(limit: Option<usize>, state: State<AppState>) -> Result<Vec<TrackItem>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::get_top_tracks(&conn, limit.unwrap_or(20))
+}
+
+// ─── Персистентная очередь ───────────────────────────────────────────────────
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueStatePayload {
+    pub track_ids: Vec<String>,
+    pub current_track_id: Option<String>,
+    pub position_sec: u64,
+    #[serde(default)]
+    pub queue_tracks: Vec<TrackItem>,
+}
+
+#[tauri::command]
+fn save_queue_state(payload: QueueStatePayload, state: State<AppState>) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::save_queue_state(
+        &conn,
+        &payload.track_ids,
+        payload.current_track_id.as_deref(),
+        payload.position_sec,
+        &payload.queue_tracks,
+    )
+}
+
+#[tauri::command]
+fn load_queue_state(state: State<AppState>) -> Result<Option<QueueStatePayload>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    Ok(db::load_queue_state(&conn)?.map(|qs| QueueStatePayload {
+        track_ids: qs.track_ids,
+        current_track_id: qs.current_track_id,
+        position_sec: qs.position_sec,
+        queue_tracks: qs.queue_tracks,
+    }))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let audio_player = AudioPlayer::new().expect("Не удалось инициализировать аудиодвижок");
-
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
+            let app_dir = app.path().app_data_dir().expect("Не найден каталог данных");
+            let cache_dir = app_dir.join("audio_cache");
+            let audio_player =
+                AudioPlayer::new(cache_dir).expect("Не удалось инициализировать аудиодвижок");
+
             let conn = db::init_database(app.handle()).expect("Ошибка инициализации SQLite");
             if let Ok(Some(saved_eq)) = db::get_setting(&conn, "eq_gains") {
                 if let Ok(arr) = serde_json::from_str::<[f32; 5]>(&saved_eq) {
                     audio_player.set_eq_gains(arr);
                 }
             }
+            if let Ok(Some(saved_cf)) = db::get_setting(&conn, "crossfade_ms") {
+                if let Ok(ms) = saved_cf.parse::<u32>() {
+                    audio_player.set_crossfade_ms(ms);
+                }
+            }
+
             #[cfg(target_os = "windows")]
             let hwnd_ptr = app
                 .get_webview_window("main")
@@ -694,6 +830,80 @@ pub fn run() {
                 player: Mutex::new(audio_player),
                 media: media_controls,
             });
+
+            // ── Глобальные горячие клавиши ───────────────────────────────────
+            global_hotkeys::start_global_hotkeys(app.handle().clone());
+
+            // ── Системный трей ────────────────────────────────────────────────
+            let show_item = MenuItem::with_id(app, "show", "Открыть Abyss Music", true, None::<&str>)?;
+            let toggle_item = MenuItem::with_id(app, "toggle", "Пауза / Играть", true, None::<&str>)?;
+            let next_item = MenuItem::with_id(app, "next", "Следующий трек", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Выйти", true, None::<&str>)?;
+            let tray_menu =
+                Menu::with_items(app, &[&show_item, &toggle_item, &next_item, &quit_item])?;
+
+            let mut tray_builder = TrayIconBuilder::new()
+                .tooltip("Abyss Music")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(move |app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(win) = app.get_webview_window("main") {
+                            let _ = win.show();
+                            let _ = win.unminimize();
+                            let _ = win.set_focus();
+                        }
+                    }
+                    "toggle" => {
+                        let _ = app.emit("media-control", "toggle");
+                    }
+                    "next" => {
+                        let _ = app.emit("media-control", "next");
+                    }
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(win) = app.get_webview_window("main") {
+                            if win.is_visible().unwrap_or(false) {
+                                let _ = win.hide();
+                            } else {
+                                let _ = win.show();
+                                let _ = win.unminimize();
+                                let _ = win.set_focus();
+                            }
+                        }
+                    }
+                });
+
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray_builder = tray_builder.icon(icon);
+            }
+            let tray = tray_builder.build(app)?;
+            app.manage(tray);
+
+            // При закрытии главного окна — прятать в трей вместо выхода
+            if let Some(main_win) = app.get_webview_window("main") {
+                let app_handle_close = app.handle().clone();
+                main_win.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        if let Some(w) = app_handle_close.get_webview_window("main") {
+                            let _ = w.hide();
+                        }
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -713,6 +923,11 @@ pub fn run() {
             get_track_lyrics,
             set_eq_gains,
             get_eq_gains,
+            set_crossfade_ms,
+            get_crossfade_ms,
+            get_audio_cache_size_mb,
+            clear_audio_cache,
+            prefetch_track,
             play_track,
             pause_track,
             resume_track,
@@ -731,8 +946,14 @@ pub fn run() {
             get_playlists,
             create_playlist,
             add_track_to_playlist,
+            remove_track_from_playlist,
+            get_playlist_tracks,
             rename_playlist,
-            delete_playlist
+            delete_playlist,
+            get_recent_tracks,
+            get_top_tracks,
+            save_queue_state,
+            load_queue_state
         ])
         .run(tauri::generate_context!())
         .expect("Ошибка запуска Abyss Music");

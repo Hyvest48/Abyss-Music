@@ -26,6 +26,13 @@ export interface YandexSearchResult {
   tracks: TrackItem[];
 }
 
+export interface QueueStatePayload {
+  trackIds: string[];
+  currentTrackId: string | null;
+  positionSec: number;
+  queueTracks?: TrackItem[];
+}
+
 export async function pickMusicFolder(): Promise<string | null> {
   const selected = await open({
     directory: true,
@@ -78,6 +85,7 @@ export const tauriApi = {
       activity: settings.activity,
       character: settings.character,
       genre: settings.genre,
+      language: settings.language,
       queueTrackId,
     }),
 
@@ -108,8 +116,21 @@ export const tauriApi = {
   setEqGains: (gains: number[]): Promise<void> =>
     invoke<void>('set_eq_gains', { gains }),
 
-  playTrack: (trackId: string, audioUrl: string): Promise<void> =>
-    invoke('play_track', { trackId, audioUrl }),
+  getCrossfadeMs: (): Promise<number> => invoke<number>('get_crossfade_ms'),
+
+  setCrossfadeMs: (ms: number): Promise<void> =>
+    invoke<void>('set_crossfade_ms', { ms }),
+
+  getAudioCacheSizeMb: (): Promise<number> =>
+    invoke<number>('get_audio_cache_size_mb'),
+
+  clearAudioCache: (): Promise<void> => invoke<void>('clear_audio_cache'),
+
+  prefetchTrack: (audioUrl: string): Promise<void> =>
+    invoke<void>('prefetch_track', { audioUrl }),
+
+  playTrack: (trackId: string, audioUrl: string, track?: TrackItem): Promise<void> =>
+    invoke('play_track', { trackId, audioUrl, track: track ?? null }),
 
   pauseTrack: (): Promise<void> => invoke('pause_track'),
 
@@ -175,12 +196,34 @@ export const tauriApi = {
   createPlaylist: (id: string, name: string): Promise<PlaylistItem> =>
     invoke<PlaylistItem>('create_playlist', { id, name }),
 
-  addTrackToPlaylist: (playlistId: string, trackId: string): Promise<void> =>
-    invoke('add_track_to_playlist', { playlistId, trackId }),
+  addTrackToPlaylist: (
+    playlistId: string,
+    trackId: string,
+    track?: TrackItem
+  ): Promise<void> =>
+    invoke('add_track_to_playlist', { playlistId, trackId, track: track ?? null }),
+
+  removeTrackFromPlaylist: (playlistId: string, trackId: string): Promise<void> =>
+    invoke('remove_track_from_playlist', { playlistId, trackId }),
+
+  getPlaylistTracks: (playlistId: string): Promise<TrackItem[]> =>
+    invoke<TrackItem[]>('get_playlist_tracks', { playlistId }),
 
   renamePlaylist: (id: string, name: string): Promise<void> =>
     invoke('rename_playlist', { id, name }),
 
   deletePlaylist: (id: string): Promise<void> =>
     invoke('delete_playlist', { id }),
+
+  getRecentTracks: (limit = 20): Promise<TrackItem[]> =>
+    invoke<TrackItem[]>('get_recent_tracks', { limit }),
+
+  getTopTracks: (limit = 20): Promise<TrackItem[]> =>
+    invoke<TrackItem[]>('get_top_tracks', { limit }),
+
+  saveQueueState: (payload: QueueStatePayload): Promise<void> =>
+    invoke<void>('save_queue_state', { payload }),
+
+  loadQueueState: (): Promise<QueueStatePayload | null> =>
+    invoke<QueueStatePayload | null>('load_queue_state'),
 };

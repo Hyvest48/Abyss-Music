@@ -86,6 +86,7 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
   const [isInstrumental, setIsInstrumental] = useState(false);
   const [isLoadingLyrics, setIsLoadingLyrics] = useState(false);
   const [previewSec, setPreviewSec] = useState<number | null>(null);
+  const lyricsScrollRef = useRef<HTMLDivElement>(null);
   const activeLineRef = useRef<HTMLButtonElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const audioLevelRef = useRef(audioLevel);
@@ -157,9 +158,15 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
   }, [syncedLyrics, positionSec]);
 
   useEffect(() => {
-    activeLineRef.current?.scrollIntoView({
+    const container = lyricsScrollRef.current;
+    const lineEl = activeLineRef.current;
+    if (!container || !lineEl) return;
+    // Прокручиваем только внутренний контейнер текста, чтобы не сдвигать верхнюю шапку оверлея
+    const targetTop =
+      lineEl.offsetTop - container.clientHeight / 2 + lineEl.clientHeight / 2;
+    container.scrollTo({
+      top: Math.max(0, targetTop),
       behavior: 'smooth',
-      block: 'center',
     });
   }, [activeIndex]);
 
@@ -363,7 +370,7 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
           )}
 
           {!isLoadingLyrics && syncedLyrics.length > 0 && (
-            <div className="lyrics-scroll">
+            <div ref={lyricsScrollRef} className="lyrics-scroll" style={{ position: 'relative' }}>
               {syncedLyrics.map((line, i) => {
                 const isActive = i === activeIndex;
                 const isPast = i < activeIndex;

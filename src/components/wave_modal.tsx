@@ -100,12 +100,34 @@ export const WaveModal: React.FC<WaveModalProps> = ({
           </div>
         </div>
 
+        <div className="modal-group">
+          <span className="modal-group-label">По языку</span>
+          <div className="pill-wrap">
+            {WAVE_CATEGORIES.language.map((item) => (
+              <button
+                key={item}
+                type="button"
+                className={`chip-btn ${draft.language === item ? 'selected' : ''}`}
+                onClick={() => toggleChip('language', item)}
+              >
+                {item}
+              </button>
+            ))}
+          </div>
+        </div>
+
         <div className="modal-footer">
           <button
             type="button"
             className="chip-btn"
             onClick={() =>
-              setDraft({ mood: null, activity: null, character: null, genre: null })
+              setDraft({
+                mood: null,
+                activity: null,
+                character: null,
+                genre: null,
+                language: null,
+              })
             }
           >
             Сбросить всё

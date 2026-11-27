@@ -792,6 +792,7 @@ pub fn wave_yandex(
     activity: Option<&str>,
     character: Option<&str>,
     genre: Option<&str>,
+    language: Option<&str>,
     queue_track_id: Option<&str>,
 ) -> Result<Vec<TrackItem>, String> {
     let client = ym_client(token)?;
@@ -800,38 +801,43 @@ pub fn wave_yandex(
 
     if queue_track_id.is_none() {
         let mut settings = serde_json::Map::new();
-        if let Some(m) = mood {
-            let val = match m.trim() {
-                "Бодрое" | "Весёлое" => "energetic",
-                "Спокойное" | "Романтичное" => "calm",
-                "Грустное" | "Мрачное" => "sad",
-                _ => "all",
-            };
-            settings.insert("moodEnergy".to_string(), Value::String(val.to_string()));
-        }
-        if let Some(a) = activity {
-            let val = match a.trim() {
+        let mood_val = match mood.map(|m| m.trim()) {
+            Some("Бодрое") | Some("Весёлое") => "energetic",
+            Some("Спокойное") | Some("Романтичное") => "calm",
+            Some("Грустное") | Some("Мрачное") => "sad",
+            _ => "all",
+        };
+        settings.insert("moodEnergy".to_string(), Value::String(mood_val.to_string()));
+
+        let diversity_val = if let Some(c) = character {
+            match c.trim() {
+                "Любимое" => "favorite",
+                "Незнакомое" | "Новинки" => "discover",
+                _ => "default",
+            }
+        } else if let Some(a) = activity {
+            match a.trim() {
                 "Для фокуса" | "Для кода" => "work",
                 "Тренировка" => "workout",
                 "В дорогу" => "road-trip",
                 "Вечерний чилл" | "Ночью" => "fall-asleep",
-                _ => "any",
-            };
-            settings.insert("diversity".to_string(), Value::String(val.to_string()));
-        }
-        if let Some(c) = character {
-            let val = match c.trim() {
-                "Любимое" => "favorite",
-                "Незнакомое" | "Новинки" => "discover",
                 _ => "default",
-            };
-            settings.insert("diversity".to_string(), Value::String(val.to_string()));
-        }
+            }
+        } else {
+            "default"
+        };
+        settings.insert("diversity".to_string(), Value::String(diversity_val.to_string()));
 
-        if !settings.is_empty() {
-            let settings_url = format!("{}/rotor/station/{}/settings2", YM_API, station_id);
-            let _ = client.post(&settings_url).json(&settings).send();
-        }
+        let lang_val = match language.map(|l| l.trim()) {
+            Some("Русский") => "russian",
+            Some("Английский") | Some("Иностранный") => "not-russian",
+            Some("Без слов") => "without-words",
+            _ => "any",
+        };
+        settings.insert("language".to_string(), Value::String(lang_val.to_string()));
+
+        let settings_url = format!("{}/rotor/station/{}/settings2", YM_API, station_id);
+        let _ = client.post(&settings_url).json(&settings).send();
 
         let token_owned = token.to_string();
         let feedback_url = format!("{}/rotor/station/{}/feedback", YM_API, station_id);

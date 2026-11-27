@@ -1,17 +1,20 @@
-﻿use std::f32::consts::PI;
-use std::fs::File;
-use std::io::{BufReader, Cursor, Read, Seek};
-use std::sync::mpsc::{self, Sender};
+﻿use std::collections::HashSet;
+use std::f32::consts::PI;
+use std::fs::{self, File};
+use std::io::{BufReader, Cursor, Read, Seek, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 use rodio::source::SeekError;
 use rodio::{Decoder, OutputStream, Sink, Source};
 use crate::models::PlaybackStatus;
 use crate::providers;
 
 static CURRENT_AUDIO_LEVEL: AtomicU32 = AtomicU32::new(0);
+const MAX_CACHE_BYTES: u64 = 500 * 1024 * 1024; // 500 МБ офлайн-кэш
 
 trait ReadSeek: Read + Seek + Send + Sync {}
 impl<T: Read + Seek + Send + Sync> ReadSeek for T {}
@@ -206,12 +209,102 @@ where
     }
 }
 
+fn cache_key_path(cache_dir: &Path, source_key: &str) -> PathBuf {
+    let digest = format!("{:x}", md5::compute(source_key.as_bytes()));
+    cache_dir.join(format!("{}.audio", digest))
+}
+
+fn touch_file(path: &Path) {
+    if let Ok(f) = fs::OpenOptions::new().write(true).open(path) {
+        let _ = f.set_modified(SystemTime::now());
+    }
+}
+
+fn save_to_cache_lru(cache_dir: &Path, key_path: &Path, bytes: &[u8]) {
+    if fs::create_dir_all(cache_dir).is_err() {
+        return;
+    }
+    let tmp_path = key_path.with_extension("tmp");
+    if let Ok(mut f) = File::create(&tmp_path) {
+        if f.write_all(bytes).is_ok() && f.flush().is_ok() {
+            drop(f);
+            let _ = fs::rename(&tmp_path, key_path);
+        } else {
+            let _ = fs::remove_file(&tmp_path);
+            return;
+        }
+    }
+    prune_cache_dir(cache_dir);
+}
+
+fn prune_cache_dir(cache_dir: &Path) {
+    let Ok(entries) = fs::read_dir(cache_dir) else {
+        return;
+    };
+    let mut files: Vec<(PathBuf, u64, SystemTime)> = Vec::new();
+    let mut total: u64 = 0;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("audio") {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            let size = meta.len();
+            let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            total = total.saturating_add(size);
+            files.push((path, size, modified));
+        }
+    }
+
+    if total <= MAX_CACHE_BYTES {
+        return;
+    }
+
+    files.sort_by_key(|item| item.2);
+    for (path, size, _) in files {
+        if total <= MAX_CACHE_BYTES {
+            break;
+        }
+        if fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(size);
+        }
+    }
+}
+
+pub fn get_cache_size_bytes(cache_dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(cache_dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("audio"))
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum()
+}
+
+pub fn clear_cache_dir(cache_dir: &Path) -> Result<(), String> {
+    if !cache_dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(cache_dir).map_err(|e| e.to_string())?.flatten() {
+        let p = entry.path();
+        if p.is_file() {
+            let _ = fs::remove_file(p);
+        }
+    }
+    Ok(())
+}
+
 enum AudioCommand {
     LoadDecoded {
         generation: u64,
         source: EqualizerSource<Decoder<Box<dyn ReadSeek>>>,
         reply: Sender<Result<(), String>>,
     },
+    FadeStep(u64),
+    PrepareDuck,
     StopForNewPlay,
     Pause,
     Resume,
@@ -224,15 +317,23 @@ enum AudioCommand {
 pub struct AudioPlayer {
     tx: Sender<AudioCommand>,
     eq_gains: Arc<Mutex<[f32; 5]>>,
+    crossfade_ms: Arc<AtomicU32>,
     play_generation: Arc<AtomicU64>,
+    cache_dir: PathBuf,
+    in_flight_prefetch: Arc<Mutex<HashSet<String>>>,
 }
 
 impl AudioPlayer {
-    pub fn new() -> Result<Self, String> {
+    pub fn new(cache_dir: PathBuf) -> Result<Self, String> {
+        let _ = fs::create_dir_all(&cache_dir);
         let (cmd_tx, cmd_rx) = mpsc::channel::<AudioCommand>();
         let eq_gains = Arc::new(Mutex::new([0.0_f32; 5]));
+        let crossfade_ms = Arc::new(AtomicU32::new(500));
         let play_generation = Arc::new(AtomicU64::new(0));
+        let in_flight_prefetch = Arc::new(Mutex::new(HashSet::new()));
         let play_gen_thread = Arc::clone(&play_generation);
+        let crossfade_thread = Arc::clone(&crossfade_ms);
+        let cmd_tx_fade = cmd_tx.clone();
 
         thread::spawn(move || {
             let output_pair = OutputStream::try_default().ok();
@@ -245,13 +346,22 @@ impl AudioPlayer {
             let mut volume: f32 = 0.75;
             let mut is_muted = false;
             let mut has_started = false;
+            let mut fade_in_started: Option<(u64, Instant, u32)> = None;
 
             while let Ok(cmd) = cmd_rx.recv() {
                 match cmd {
+                    AudioCommand::PrepareDuck => {
+                        if let Some(ref s) = sink {
+                            if !s.empty() && !s.is_paused() && !is_muted {
+                                s.set_volume(volume * 0.45);
+                            }
+                        }
+                    }
                     AudioCommand::StopForNewPlay => {
                         if let Some(old_sink) = sink.take() {
                             old_sink.stop();
                         }
+                        fade_in_started = None;
                         has_started = false;
                         CURRENT_AUDIO_LEVEL.store(0.0_f32.to_bits(), Ordering::Relaxed);
                     }
@@ -264,16 +374,54 @@ impl AudioPlayer {
                             let _ = reply.send(Ok(()));
                             continue;
                         }
+
+                        let cf_ms = crossfade_thread.load(Ordering::Relaxed);
+                        let target_vol = if is_muted { 0.0 } else { volume };
+
+                        // Если включён crossfade и старый трек играет — быстро и плавно затухаем его в фоне
                         if let Some(old_sink) = sink.take() {
-                            old_sink.stop();
+                            if cf_ms > 0 && !old_sink.empty() && !old_sink.is_paused() && target_vol > 0.01 {
+                                let fade_steps = (cf_ms / 20).max(4);
+                                let step_dur = Duration::from_millis(20);
+                                let start_vol = old_sink.volume().min(target_vol);
+                                thread::spawn(move || {
+                                    for i in 1..=fade_steps {
+                                        let ratio = i as f32 / fade_steps as f32;
+                                        let curve = (1.0 - ratio).powf(1.8);
+                                        old_sink.set_volume(start_vol * curve);
+                                        thread::sleep(step_dur);
+                                    }
+                                    old_sink.stop();
+                                });
+                            } else {
+                                old_sink.stop();
+                            }
                         }
+
                         CURRENT_AUDIO_LEVEL.store(0.0_f32.to_bits(), Ordering::Relaxed);
 
                         let res = match stream_handle.as_ref() {
                             Some(handle) => Sink::try_new(handle)
                                 .map_err(|e| e.to_string())
                                 .map(|new_sink| {
-                                    new_sink.set_volume(if is_muted { 0.0 } else { volume });
+                                    if cf_ms > 0 && !is_muted && volume > 0.01 {
+                                        new_sink.set_volume(target_vol * 0.12);
+                                        fade_in_started = Some((generation, Instant::now(), cf_ms));
+                                        let tx_clone = cmd_tx_fade.clone();
+                                        let gen_id = generation;
+                                        thread::spawn(move || {
+                                            let steps = (cf_ms / 20).max(4) + 2;
+                                            for _ in 0..steps {
+                                                thread::sleep(Duration::from_millis(20));
+                                                if tx_clone.send(AudioCommand::FadeStep(gen_id)).is_err() {
+                                                    break;
+                                                }
+                                            }
+                                        });
+                                    } else {
+                                        fade_in_started = None;
+                                        new_sink.set_volume(target_vol);
+                                    }
                                     new_sink.append(source);
                                     new_sink.play();
                                     sink = Some(new_sink);
@@ -283,7 +431,26 @@ impl AudioPlayer {
                         };
                         let _ = reply.send(res);
                     }
+                    AudioCommand::FadeStep(gen_id) => {
+                        if let Some((active_gen, started_at, cf_ms)) = fade_in_started {
+                            if active_gen != gen_id {
+                                continue;
+                            }
+                            let elapsed = started_at.elapsed().as_millis() as f32;
+                            let progress = (elapsed / cf_ms.max(1) as f32).clamp(0.0, 1.0);
+                            // Перцептивная equal-power кривая нарастания — старт слышен сразу, без провала
+                            let curved = 0.12 + 0.88 * progress.sqrt();
+                            if let Some(ref s) = sink {
+                                let target = if is_muted { 0.0 } else { volume };
+                                s.set_volume(target * if progress >= 1.0 { 1.0 } else { curved });
+                            }
+                            if progress >= 1.0 {
+                                fade_in_started = None;
+                            }
+                        }
+                    }
                     AudioCommand::Pause => {
+                        fade_in_started = None;
                         if let Some(ref s) = sink {
                             s.pause();
                         }
@@ -291,6 +458,7 @@ impl AudioPlayer {
                     }
                     AudioCommand::Resume => {
                         if let Some(ref s) = sink {
+                            s.set_volume(if is_muted { 0.0 } else { volume });
                             s.play();
                         }
                     }
@@ -304,6 +472,7 @@ impl AudioPlayer {
                         let _ = reply.send(res);
                     }
                     AudioCommand::SetVolume(vol) => {
+                        fade_in_started = None;
                         volume = vol.clamp(0.0, 1.0);
                         if volume > 0.0 {
                             is_muted = false;
@@ -313,6 +482,7 @@ impl AudioPlayer {
                         }
                     }
                     AudioCommand::ToggleMute(reply) => {
+                        fade_in_started = None;
                         is_muted = !is_muted;
                         if let Some(ref s) = sink {
                             s.set_volume(if is_muted { 0.0 } else { volume });
@@ -355,8 +525,81 @@ impl AudioPlayer {
         Ok(Self {
             tx: cmd_tx,
             eq_gains,
+            crossfade_ms,
             play_generation,
+            cache_dir,
+            in_flight_prefetch,
         })
+    }
+
+    pub fn prefetch_track(&self, path: &str, ym_token: Option<&str>) {
+        let is_remote = path.starts_with("ym://")
+            || path.starts_with("http://")
+            || path.starts_with("https://");
+        if !is_remote {
+            return;
+        }
+        let cached_path = cache_key_path(&self.cache_dir, path);
+        if cached_path.exists() {
+            return;
+        }
+        if let Ok(mut set) = self.in_flight_prefetch.lock() {
+            if !set.insert(path.to_string()) {
+                return;
+            }
+        } else {
+            return;
+        }
+
+        let source_path = path.to_string();
+        let token_opt = ym_token.map(|t| t.to_string());
+        let cache_dir = self.cache_dir.clone();
+        let in_flight = Arc::clone(&self.in_flight_prefetch);
+
+        thread::spawn(move || {
+            struct PrefetchGuard {
+                set: Arc<Mutex<HashSet<String>>>,
+                key: String,
+            }
+            impl Drop for PrefetchGuard {
+                fn drop(&mut self) {
+                    if let Ok(mut s) = self.set.lock() {
+                        s.remove(&self.key);
+                    }
+                }
+            }
+            let _cleanup = PrefetchGuard {
+                set: in_flight,
+                key: source_path.clone(),
+            };
+            let resolved = if source_path.starts_with("ym://") {
+                let Some(token) = token_opt.as_deref().filter(|t| !t.trim().is_empty()) else {
+                    return;
+                };
+                match providers::resolve_yandex_stream_url(token, &source_path) {
+                    Ok(u) => u,
+                    Err(_) => return,
+                }
+            } else {
+                source_path.clone()
+            };
+
+            if resolved.starts_with("http://") || resolved.starts_with("https://") {
+                if let Ok(resp) = providers::shared_http_client()
+                    .get(&resolved)
+                    .timeout(Duration::from_secs(35))
+                    .send()
+                {
+                    if let Ok(ok_resp) = resp.error_for_status() {
+                        if let Ok(bytes) = ok_resp.bytes() {
+                            if !bytes.is_empty() {
+                                save_to_cache_lru(&cache_dir, &cached_path, &bytes);
+                            }
+                        }
+                    }
+                }
+            }
+        });
     }
 
     pub fn set_eq_gains(&self, gains: [f32; 5]) {
@@ -371,13 +614,32 @@ impl AudioPlayer {
         self.eq_gains.lock().map(|g| *g).unwrap_or([0.0; 5])
     }
 
+    pub fn set_crossfade_ms(&self, ms: u32) {
+        self.crossfade_ms.store(ms.min(8000), Ordering::Relaxed);
+    }
+
+    pub fn get_crossfade_ms(&self) -> u32 {
+        self.crossfade_ms.load(Ordering::Relaxed)
+    }
+
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache_dir
+    }
+
     pub fn play_file_async_prep(
         &self,
         path: &str,
         ym_token: Option<&str>,
     ) -> Result<mpsc::Receiver<Result<(), String>>, String> {
         let generation = self.play_generation.fetch_add(1, Ordering::AcqRel) + 1;
-        let _ = self.tx.send(AudioCommand::StopForNewPlay);
+        // При отключённом crossfade останавливаем старый трек мгновенно, иначе — приглушаем при сетевой загрузке
+        if self.crossfade_ms.load(Ordering::Relaxed) == 0 {
+            let _ = self.tx.send(AudioCommand::StopForNewPlay);
+        } else if !cache_key_path(&self.cache_dir, path).exists()
+            && (path.starts_with("ym://") || path.starts_with("http://") || path.starts_with("https://"))
+        {
+            let _ = self.tx.send(AudioCommand::PrepareDuck);
+        }
 
         let (reply_tx, reply_rx) = mpsc::channel();
         let source_path = path.to_string();
@@ -385,9 +647,28 @@ impl AudioPlayer {
         let eq_gains = Arc::clone(&self.eq_gains);
         let play_gen = Arc::clone(&self.play_generation);
         let cmd_tx = self.tx.clone();
+        let cache_dir = self.cache_dir.clone();
 
         thread::spawn(move || {
             let load_res = (|| -> Result<EqualizerSource<Decoder<Box<dyn ReadSeek>>>, String> {
+                let is_remote = source_path.starts_with("ym://")
+                    || source_path.starts_with("http://")
+                    || source_path.starts_with("https://");
+
+                // 1. Сначала пробуем офлайн-кэш для удалённых треков
+                if is_remote {
+                    let cached_path = cache_key_path(&cache_dir, &source_path);
+                    if cached_path.exists() {
+                        if let Ok(file) = File::open(&cached_path) {
+                            if let Ok(decoded) = Decoder::new(Box::new(BufReader::new(file)) as Box<dyn ReadSeek>) {
+                                touch_file(&cached_path);
+                                return Ok(EqualizerSource::new(decoded, eq_gains));
+                            }
+                        }
+                        let _ = fs::remove_file(&cached_path);
+                    }
+                }
+
                 let resolved_source = if source_path.starts_with("ym://") {
                     let token = token_opt
                         .as_deref()
@@ -395,7 +676,7 @@ impl AudioPlayer {
                         .ok_or("Для воспроизведения треков Яндекс Музыки войдите в Яндекс ID")?;
                     providers::resolve_yandex_stream_url(token, &source_path)?
                 } else {
-                    source_path
+                    source_path.clone()
                 };
 
                 if generation != play_gen.load(Ordering::Acquire) {
@@ -415,6 +696,16 @@ impl AudioPlayer {
                     let bytes = resp
                         .bytes()
                         .map_err(|e| format!("Ошибка чтения аудиопотока: {}", e))?;
+
+                    if is_remote && !bytes.is_empty() {
+                        let cached_path = cache_key_path(&cache_dir, &source_path);
+                        let cache_dir_bg = cache_dir.clone();
+                        let bytes_clone = bytes.clone();
+                        thread::spawn(move || {
+                            save_to_cache_lru(&cache_dir_bg, &cached_path, &bytes_clone);
+                        });
+                    }
+
                     Box::new(Cursor::new(bytes))
                 } else {
                     let file = File::open(&resolved_source)

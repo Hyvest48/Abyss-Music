@@ -59,6 +59,7 @@ interface ArtistViewProps {
   onBack: () => void;
   onSelectTrack: (track: TrackItem, queue: TrackItem[]) => void;
   onToggleFavorite: (trackId: string, track?: TrackItem) => void;
+  onAddToPlaylist?: (track: TrackItem) => void;
   onOpenArtist: (artistName: string) => void;
 }
 
@@ -74,6 +75,7 @@ export const ArtistView: React.FC<ArtistViewProps> = ({
   onBack,
   onSelectTrack,
   onToggleFavorite,
+  onAddToPlaylist,
   onOpenArtist,
 }) => {
   const [profile, setProfile] = useState<ArtistProfile | null>(null);
@@ -1053,6 +1055,7 @@ export const ArtistView: React.FC<ArtistViewProps> = ({
                 isPlaying={isPlaying}
                 onSelectTrack={(t) => onSelectTrack(t, filteredSubTracks)}
                 onToggleFavorite={onToggleFavorite}
+                onAddToPlaylist={onAddToPlaylist}
                 onSelectArtist={onOpenArtist}
               />
             )}

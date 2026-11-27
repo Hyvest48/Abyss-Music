@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Sliders, RotateCcw, X } from 'lucide-react';
+import { Sliders, RotateCcw, X, Waves, HardDrive, Trash2 } from 'lucide-react';
 import { tauriApi } from '../services/tauri_api';
 
 interface EqualizerModalProps {
@@ -24,19 +24,34 @@ const PRESETS: { name: string; gains: number[] }[] = [
   { name: 'Чистый вокал', gains: [-2, 0.5, 4, 4.5, 1.5] },
 ];
 
+const CROSSFADE_OPTIONS = [
+  { label: 'Выкл', ms: 0 },
+  { label: '0.5 с', ms: 500 },
+  { label: '1.2 с', ms: 1200 },
+  { label: '2.5 с', ms: 2500 },
+];
+
 export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose }) => {
   const [gains, setGains] = useState<number[]>([0, 0, 0, 0, 0]);
+  const [crossfadeMs, setCrossfadeMs] = useState<number>(500);
+  const [cacheSizeMb, setCacheSizeMb] = useState<number>(0);
   const eqTimerRef = React.useRef<number | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
     let cancelled = false;
-    tauriApi
-      .getEqGains()
-      .then((loaded) => {
-        if (!cancelled && Array.isArray(loaded) && loaded.length === 5) {
+    Promise.all([
+      tauriApi.getEqGains(),
+      tauriApi.getCrossfadeMs(),
+      tauriApi.getAudioCacheSizeMb(),
+    ])
+      .then(([loaded, cf, cacheMb]) => {
+        if (cancelled) return;
+        if (Array.isArray(loaded) && loaded.length === 5) {
           setGains(loaded);
         }
+        setCrossfadeMs(cf);
+        setCacheSizeMb(cacheMb);
       })
       .catch(() => {});
     return () => {
@@ -197,6 +212,77 @@ export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose 
               </div>
             );
           })}
+        </div>
+
+        <div
+          style={{
+            marginTop: 16,
+            padding: '12px 14px',
+            borderRadius: 14,
+            background: 'rgba(255,255,255,0.03)',
+            border: '1px solid rgba(255,255,255,0.06)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 12,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+              <Waves size={15} style={{ color: 'var(--accent-warm)' }} />
+              <span>Плавный переход (Crossfade)</span>
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {CROSSFADE_OPTIONS.map((opt) => {
+                const active = crossfadeMs === opt.ms;
+                return (
+                  <button
+                    key={opt.ms}
+                    type="button"
+                    className="wave-active-tag"
+                    style={{
+                      cursor: 'pointer',
+                      border: active
+                        ? '1px solid var(--accent-warm)'
+                        : '1px solid rgba(255,255,255,0.08)',
+                      background: active ? 'rgba(255,255,255,0.14)' : 'rgba(255,255,255,0.04)',
+                    }}
+                    onClick={() => {
+                      setCrossfadeMs(opt.ms);
+                      void tauriApi.setCrossfadeMs(opt.ms).catch(() => {});
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+              <HardDrive size={15} style={{ color: 'var(--accent-warm)' }} />
+              <span>Офлайн-кэш треков: {cacheSizeMb.toFixed(1)} МБ</span>
+            </div>
+            <button
+              type="button"
+              className="wave-active-tag"
+              style={{
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                border: '1px solid rgba(255,255,255,0.1)',
+                background: 'rgba(255,255,255,0.05)',
+              }}
+              onClick={async () => {
+                await tauriApi.clearAudioCache().catch(() => {});
+                setCacheSizeMb(0);
+              }}
+            >
+              <Trash2 size={13} />
+              <span>Очистить</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

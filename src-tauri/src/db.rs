@@ -35,9 +35,27 @@ pub fn init_database(app: &AppHandle) -> Result<Connection, String> {
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS play_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_id TEXT NOT NULL,
+            played_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at DESC);
+        CREATE TABLE IF NOT EXISTS queue_state (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            track_ids TEXT NOT NULL DEFAULT '[]',
+            current_track_id TEXT,
+            position_sec INTEGER NOT NULL DEFAULT 0,
+            queue_json TEXT NOT NULL DEFAULT '[]'
         );"
     )
     .map_err(|e| e.to_string())?;
+
+    let _ = conn.execute(
+        "ALTER TABLE queue_state ADD COLUMN queue_json TEXT NOT NULL DEFAULT '[]'",
+        [],
+    );
 
     Ok(conn)
 }
@@ -70,7 +88,7 @@ pub fn delete_setting(conn: &Connection, key: &str) -> Result<(), String> {
 
 pub fn get_all_tracks(conn: &Connection) -> Result<Vec<TrackItem>, String> {
     let mut stmt = conn
-        .prepare("SELECT id, title, artist, album, duration_seconds, source_type, audio_url, cover_url, is_favorite FROM tracks ORDER BY title ASC")
+        .prepare("SELECT id, title, artist, album, duration_seconds, source_type, audio_url, cover_url, is_favorite FROM tracks WHERE source_type = 'local' ORDER BY title ASC")
         .map_err(|e| e.to_string())?;
 
     let rows = stmt
@@ -94,6 +112,32 @@ pub fn get_all_tracks(conn: &Connection) -> Result<Vec<TrackItem>, String> {
         tracks.push(track.map_err(|e| e.to_string())?);
     }
     Ok(tracks)
+}
+
+pub fn upsert_single_track(conn: &Connection, t: &TrackItem) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO tracks (id, title, artist, album, duration_seconds, source_type, audio_url, cover_url, is_favorite)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(audio_url) DO UPDATE SET
+           title = excluded.title,
+           artist = excluded.artist,
+           album = excluded.album,
+           duration_seconds = excluded.duration_seconds,
+           cover_url = COALESCE(excluded.cover_url, tracks.cover_url)",
+        params![
+            t.id,
+            t.title,
+            t.artist,
+            t.album,
+            t.duration_seconds as i64,
+            t.source_type,
+            t.audio_url,
+            t.cover_url,
+            if t.is_favorite { 1 } else { 0 }
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 pub fn upsert_tracks(conn: &mut Connection, tracks: &[TrackItem]) -> Result<(), String> {
@@ -126,9 +170,25 @@ pub fn upsert_tracks(conn: &mut Connection, tracks: &[TrackItem]) -> Result<(), 
 }
 
 pub fn record_play(conn: &Connection, track_id: &str) -> Result<(), String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     conn.execute(
         "UPDATE tracks SET play_count = play_count + 1 WHERE id = ?1",
         params![track_id],
+    )
+    .map_err(|e| e.to_string())?;
+    // Записываем в историю прослушиваний
+    conn.execute(
+        "INSERT INTO play_history (track_id, played_at) VALUES (?1, ?2)",
+        params![track_id, now],
+    )
+    .map_err(|e| e.to_string())?;
+    // Держим историю не более 500 записей
+    conn.execute(
+        "DELETE FROM play_history WHERE id NOT IN (SELECT id FROM play_history ORDER BY played_at DESC LIMIT 500)",
+        [],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -221,6 +281,53 @@ pub fn add_track_to_playlist(conn: &Connection, playlist_id: &str, track_id: &st
     Ok(())
 }
 
+pub fn remove_track_from_playlist(
+    conn: &Connection,
+    playlist_id: &str,
+    track_id: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
+        params![playlist_id, track_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn get_playlist_tracks(conn: &Connection, playlist_id: &str) -> Result<Vec<TrackItem>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.id, t.title, t.artist, t.album, t.duration_seconds,
+                    t.source_type, t.audio_url, t.cover_url, t.is_favorite
+             FROM playlist_tracks pt
+             JOIN tracks t ON t.id = pt.track_id
+             WHERE pt.playlist_id = ?1",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(params![playlist_id], |row| {
+            Ok(TrackItem {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                artist: row.get(2)?,
+                album: row.get(3)?,
+                duration_seconds: row.get::<_, i64>(4)? as u64,
+                source_type: row.get(5)?,
+                audio_url: row.get(6)?,
+                cover_url: row.get(7)?,
+                is_favorite: row.get::<_, i64>(8)? != 0,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut tracks = Vec::new();
+    for t in rows {
+        tracks.push(t.map_err(|e| e.to_string())?);
+    }
+    Ok(tracks)
+}
+
 pub fn rename_playlist(conn: &Connection, id: &str, name: &str) -> Result<(), String> {
     conn.execute(
         "UPDATE playlists SET name = ?1 WHERE id = ?2",
@@ -241,4 +348,141 @@ pub fn delete_playlist(conn: &mut Connection, id: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Возвращает `limit` последних прослушанных треков (без дублей — берём первый вхождение).
+pub fn get_recent_tracks(conn: &Connection, limit: usize) -> Result<Vec<TrackItem>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.id, t.title, t.artist, t.album, t.duration_seconds,
+                    t.source_type, t.audio_url, t.cover_url, t.is_favorite
+             FROM play_history ph
+             JOIN tracks t ON t.id = ph.track_id
+             GROUP BY ph.track_id
+             ORDER BY MAX(ph.played_at) DESC
+             LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(params![limit as i64], |row| {
+            Ok(TrackItem {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                artist: row.get(2)?,
+                album: row.get(3)?,
+                duration_seconds: row.get::<_, i64>(4)? as u64,
+                source_type: row.get(5)?,
+                audio_url: row.get(6)?,
+                cover_url: row.get(7)?,
+                is_favorite: row.get::<_, i64>(8)? != 0,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut tracks = Vec::new();
+    for t in rows {
+        tracks.push(t.map_err(|e| e.to_string())?);
+    }
+    Ok(tracks)
+}
+
+/// Возвращает `limit` самых часто слушаемых треков.
+pub fn get_top_tracks(conn: &Connection, limit: usize) -> Result<Vec<TrackItem>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, title, artist, album, duration_seconds,
+                    source_type, audio_url, cover_url, is_favorite
+             FROM tracks
+             WHERE play_count > 0
+             ORDER BY play_count DESC, title ASC
+             LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(params![limit as i64], |row| {
+            Ok(TrackItem {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                artist: row.get(2)?,
+                album: row.get(3)?,
+                duration_seconds: row.get::<_, i64>(4)? as u64,
+                source_type: row.get(5)?,
+                audio_url: row.get(6)?,
+                cover_url: row.get(7)?,
+                is_favorite: row.get::<_, i64>(8)? != 0,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut tracks = Vec::new();
+    for t in rows {
+        tracks.push(t.map_err(|e| e.to_string())?);
+    }
+    Ok(tracks)
+}
+
+#[derive(Debug)]
+pub struct QueueState {
+    pub track_ids: Vec<String>,
+    pub current_track_id: Option<String>,
+    pub position_sec: u64,
+    pub queue_tracks: Vec<TrackItem>,
+}
+
+pub fn save_queue_state(
+    conn: &Connection,
+    track_ids: &[String],
+    current_track_id: Option<&str>,
+    position_sec: u64,
+    queue_tracks: &[TrackItem],
+) -> Result<(), String> {
+    let ids_json = serde_json::to_string(track_ids).map_err(|e| e.to_string())?;
+    // Ограничиваем сериализованный список 200 треками, чтобы не раздувать БД
+    let capped: Vec<&TrackItem> = queue_tracks.iter().take(200).collect();
+    let queue_json = serde_json::to_string(&capped).map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO queue_state (id, track_ids, current_track_id, position_sec, queue_json)
+         VALUES (1, ?1, ?2, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET
+           track_ids = excluded.track_ids,
+           current_track_id = excluded.current_track_id,
+           position_sec = excluded.position_sec,
+           queue_json = excluded.queue_json",
+        params![ids_json, current_track_id, position_sec as i64, queue_json],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn load_queue_state(conn: &Connection) -> Result<Option<QueueState>, String> {
+    let result = conn
+        .query_row(
+            "SELECT track_ids, current_track_id, position_sec, queue_json FROM queue_state WHERE id = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    if let Some((ids_json, current_id, pos, queue_json)) = result {
+        let track_ids: Vec<String> = serde_json::from_str(&ids_json).unwrap_or_default();
+        let queue_tracks: Vec<TrackItem> = serde_json::from_str(&queue_json).unwrap_or_default();
+        Ok(Some(QueueState {
+            track_ids,
+            current_track_id: current_id,
+            position_sec: pos.max(0) as u64,
+            queue_tracks,
+        }))
+    } else {
+        Ok(None)
+    }
 }
