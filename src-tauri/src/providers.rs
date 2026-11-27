@@ -1,3 +1,4 @@
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -96,28 +97,53 @@ fn iso_timestamp_now() -> String {
     )
 }
 
-fn ym_client(token: &str) -> Result<reqwest::blocking::Client, String> {
-    if token.trim().is_empty() {
-        return Err("Токен Яндекс Музыки не задан. Войдите в аккаунт Яндекс ID.".to_string());
+static SHARED_HTTP_CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+
+/// Единый пул HTTP-соединений с Keep-Alive, чтобы не тратить время на новый TLS handshake на каждый запрос
+pub fn shared_http_client() -> &'static reqwest::blocking::Client {
+    SHARED_HTTP_CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .no_proxy()
+            .pool_max_idle_per_host(12)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(30))
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("Не удалось создать HTTP-клиент")
+    })
+}
+
+#[derive(Clone, Copy)]
+struct YmClient<'a> {
+    http: &'static reqwest::blocking::Client,
+    token: &'a str,
+}
+
+impl<'a> YmClient<'a> {
+    fn get(&self, url: &str) -> reqwest::blocking::RequestBuilder {
+        self.http
+            .get(url)
+            .header(reqwest::header::AUTHORIZATION, format!("OAuth {}", self.token))
+            .header("X-Yandex-Music-Client", YM_CLIENT_HEADER)
     }
 
-    let mut headers = reqwest::header::HeaderMap::new();
-    let auth_val = format!("OAuth {}", token.trim());
-    headers.insert(
-        reqwest::header::AUTHORIZATION,
-        reqwest::header::HeaderValue::from_str(&auth_val).map_err(|e| e.to_string())?,
-    );
-    headers.insert(
-        "X-Yandex-Music-Client",
-        reqwest::header::HeaderValue::from_static(YM_CLIENT_HEADER),
-    );
+    fn post(&self, url: &str) -> reqwest::blocking::RequestBuilder {
+        self.http
+            .post(url)
+            .header(reqwest::header::AUTHORIZATION, format!("OAuth {}", self.token))
+            .header("X-Yandex-Music-Client", YM_CLIENT_HEADER)
+    }
+}
 
-    reqwest::blocking::Client::builder()
-        .no_proxy()
-        .default_headers(headers)
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())
+fn ym_client(token: &str) -> Result<YmClient<'_>, String> {
+    let clean = token.trim();
+    if clean.is_empty() {
+        return Err("Токен Яндекс Музыки не задан. Войдите в аккаунт Яндекс ID.".to_string());
+    }
+    Ok(YmClient {
+        http: shared_http_client(),
+        token: clean,
+    })
 }
 
 fn extract_track_year(t: &Value) -> Option<u64> {
@@ -266,6 +292,37 @@ pub fn search_yandex(token: &str, query: &str) -> Result<Vec<TrackItem>, String>
 
     let tracks = resp
         .pointer("/result/tracks/results")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(parse_ym_track).collect())
+        .unwrap_or_default();
+
+    Ok(tracks)
+}
+
+pub fn resolve_yandex_tracks(token: &str, track_ids: &[String]) -> Result<Vec<TrackItem>, String> {
+    let clean_ids: Vec<String> = track_ids
+        .iter()
+        .map(|id| id.trim_start_matches("ym-").trim_start_matches("ym://").trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect();
+
+    if clean_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let client = ym_client(token)?;
+    let url = format!("{}/tracks", YM_API);
+    let joined = clean_ids.join(",");
+    let resp: Value = client
+        .post(&url)
+        .form(&[("track-ids", joined.as_str())])
+        .send()
+        .map_err(|e| e.to_string())?
+        .json()
+        .map_err(|e| e.to_string())?;
+
+    let tracks = resp
+        .get("result")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(parse_ym_track).collect())
         .unwrap_or_default();
@@ -550,7 +607,7 @@ pub fn get_album_tracks(token: &str, album_id: &str) -> Result<Vec<TrackItem>, S
 }
 
 fn fetch_fresh_2026_releases(
-    client: &reqwest::blocking::Client,
+    client: YmClient<'_>,
     token: &str,
     genre: Option<&str>,
 ) -> Vec<TrackItem> {
@@ -662,14 +719,20 @@ pub fn wave_yandex(
             let _ = client.post(&settings_url).json(&settings).send();
         }
 
+        let token_owned = token.to_string();
         let feedback_url = format!("{}/rotor/station/{}/feedback", YM_API, station_id);
-        let _ = client
-            .post(&feedback_url)
-            .json(&json!({
-                "type": "radioStarted",
-                "timestamp": iso_timestamp_now()
-            }))
-            .send();
+        // Отправляем событие старта волны в фоне, не задерживая загрузку треков
+        std::thread::spawn(move || {
+            if let Ok(bg_client) = ym_client(&token_owned) {
+                let _ = bg_client
+                    .post(&feedback_url)
+                    .json(&json!({
+                        "type": "radioStarted",
+                        "timestamp": iso_timestamp_now()
+                    }))
+                    .send();
+            }
+        });
     }
 
     let url = format!("{}/rotor/station/{}/tracks", YM_API, station_id);
@@ -702,7 +765,7 @@ pub fn wave_yandex(
             .collect();
 
         if tracks.len() < 4 {
-            let fresh = fetch_fresh_2026_releases(&client, token, genre);
+            let fresh = fetch_fresh_2026_releases(client, token, genre);
             for t in fresh {
                 if !tracks.iter().any(|x| x.id == t.id) {
                     tracks.push(t);
@@ -1036,12 +1099,7 @@ pub fn fetch_lyrics(
     album: &str,
     duration_seconds: u64,
 ) -> Result<TrackLyrics, String> {
-    let client = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
-        .timeout(Duration::from_secs(12))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = shared_http_client();
 
     let primary_artist = artist.split(',').next().unwrap_or(artist).trim();
 
@@ -1066,10 +1124,13 @@ pub fn fetch_lyrics(
     }
 
     let get_url = format!("{}/get", LRCLIB_API);
-    let mut req = client.get(&get_url).query(&[
-        ("track_name", title.trim()),
-        ("artist_name", primary_artist),
-    ]);
+    let mut req = client
+        .get(&get_url)
+        .timeout(Duration::from_secs(2))
+        .query(&[
+            ("track_name", title.trim()),
+            ("artist_name", primary_artist),
+        ]);
 
     if !album.trim().is_empty() && album != "Яндекс Музыка" && album != "Локальная медиатека" {
         req = req.query(&[("album_name", album.trim())]);
@@ -1092,7 +1153,12 @@ pub fn fetch_lyrics(
 
     let search_url = format!("{}/search", LRCLIB_API);
     let query = format!("{} {}", primary_artist, title.trim());
-    if let Ok(resp) = client.get(&search_url).query(&[("q", query.as_str())]).send() {
+    if let Ok(resp) = client
+        .get(&search_url)
+        .timeout(Duration::from_secs(2))
+        .query(&[("q", query.as_str())])
+        .send()
+    {
         if let Ok(Value::Array(arr)) = resp.json::<Value>() {
             if let Some(best) = arr
                 .iter()

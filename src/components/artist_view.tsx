@@ -57,7 +57,7 @@ interface ArtistViewProps {
   isPlaying: boolean;
   onBack: () => void;
   onSelectTrack: (track: TrackItem, queue: TrackItem[]) => void;
-  onToggleFavorite: (trackId: string) => void;
+  onToggleFavorite: (trackId: string, track?: TrackItem) => void;
   onOpenArtist: (artistName: string) => void;
 }
 
@@ -638,7 +638,7 @@ export const ArtistView: React.FC<ArtistViewProps> = ({
                         <button
                           type="button"
                           className="icon-ghost-btn"
-                          onClick={() => onToggleFavorite(track.id)}
+                          onClick={() => onToggleFavorite(track.id, track)}
                           title="Мне нравится"
                         >
                           <Heart

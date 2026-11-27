@@ -65,7 +65,7 @@ fn scan_folder(folder_path: String, state: State<AppState>) -> Result<Vec<TrackI
 }
 
 #[tauri::command]
-fn get_yandex_status(state: State<AppState>) -> Result<YandexAuthStatus, String> {
+async fn get_yandex_status(state: State<'_, AppState>) -> Result<YandexAuthStatus, String> {
     let token_opt = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         db::get_setting(&conn, "yandex_token")?
@@ -73,7 +73,10 @@ fn get_yandex_status(state: State<AppState>) -> Result<YandexAuthStatus, String>
 
     if let Some(token) = token_opt {
         if !token.trim().is_empty() {
-            if let Ok(name) = providers::get_yandex_account_name(&token) {
+            if let Ok(Ok(name)) =
+                tauri::async_runtime::spawn_blocking(move || providers::get_yandex_account_name(&token))
+                    .await
+            {
                 return Ok(YandexAuthStatus {
                     is_authorized: true,
                     account_name: Some(name),
@@ -171,7 +174,10 @@ async fn open_yandex_auth(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn search_yandex_tracks(query: String, state: State<AppState>) -> Result<Vec<TrackItem>, String> {
+async fn search_yandex_tracks(
+    query: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<TrackItem>, String> {
     let token = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         db::get_setting(&conn, "yandex_token")?.unwrap_or_default()
@@ -179,7 +185,26 @@ fn search_yandex_tracks(query: String, state: State<AppState>) -> Result<Vec<Tra
     if token.trim().is_empty() {
         return Ok(Vec::new());
     }
-    providers::search_yandex(&token, &query)
+    tauri::async_runtime::spawn_blocking(move || providers::search_yandex(&token, &query))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn resolve_yandex_tracks(
+    track_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<TrackItem>, String> {
+    let token = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::get_setting(&conn, "yandex_token")?.unwrap_or_default()
+    };
+    if token.trim().is_empty() || track_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    tauri::async_runtime::spawn_blocking(move || providers::resolve_yandex_tracks(&token, &track_ids))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -236,26 +261,30 @@ async fn get_album_tracks(
 }
 
 #[tauri::command]
-fn get_yandex_wave(
+async fn get_yandex_wave(
     mood: Option<String>,
     activity: Option<String>,
     character: Option<String>,
     genre: Option<String>,
     queue_track_id: Option<String>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<TrackItem>, String> {
     let token = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         db::get_setting(&conn, "yandex_token")?.unwrap_or_default()
     };
-    providers::wave_yandex(
-        &token,
-        mood.as_deref(),
-        activity.as_deref(),
-        character.as_deref(),
-        genre.as_deref(),
-        queue_track_id.as_deref(),
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        providers::wave_yandex(
+            &token,
+            mood.as_deref(),
+            activity.as_deref(),
+            character.as_deref(),
+            genre.as_deref(),
+            queue_track_id.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -273,13 +302,17 @@ fn send_wave_feedback(
     if token.trim().is_empty() {
         return Ok(());
     }
-    providers::send_yandex_wave_feedback(
-        &token,
-        genre.as_deref(),
-        &event_type,
-        track_id.as_deref(),
-        total_played_seconds,
-    )
+    // Отправляем телеметрию волны в фоне, не задерживая переключение треков
+    std::thread::spawn(move || {
+        let _ = providers::send_yandex_wave_feedback(
+            &token,
+            genre.as_deref(),
+            &event_type,
+            track_id.as_deref(),
+            total_played_seconds,
+        );
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -334,14 +367,24 @@ fn get_eq_gains(state: State<AppState>) -> Result<Vec<f32>, String> {
 }
 
 #[tauri::command]
-fn play_track(track_id: String, audio_url: String, state: State<AppState>) -> Result<(), String> {
+async fn play_track(
+    track_id: String,
+    audio_url: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     let ym_token = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let _ = db::record_play(&conn, &track_id);
         db::get_setting(&conn, "yandex_token")?
     };
-    let player = state.player.lock().map_err(|e| e.to_string())?;
-    player.play_file(&audio_url, ym_token.as_deref())
+    // Сразу освобождаем мьютекс плеера до ожидания загрузки потока, чтобы не блокировать pause/status
+    let reply_rx = {
+        let player = state.player.lock().map_err(|e| e.to_string())?;
+        player.play_file_async_prep(&audio_url, ym_token.as_deref())?
+    };
+    tauri::async_runtime::spawn_blocking(move || reply_rx.recv().map_err(|e| e.to_string())?)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -451,6 +494,7 @@ pub fn run() {
             open_yandex_auth,
             search_yandex_tracks,
             search_yandex_all,
+            resolve_yandex_tracks,
             get_artist_profile,
             get_album_tracks,
             get_yandex_wave,

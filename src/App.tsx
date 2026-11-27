@@ -706,11 +706,17 @@ export const App: React.FC = () => {
   }, []);
 
   const handleToggleFavorite = useCallback(
-    async (trackId: string) => {
+    async (trackId: string, trackData?: TrackItem) => {
+      // Ищем полные метаданные сначала в переданном объекте (актуально для карточки артиста), затем в общих списках
       const target =
+        trackData ||
         allTracksRef.current.find((t) => t.id === trackId) ||
         (currentTrack?.id === trackId ? currentTrack : undefined);
-      const nextFav = target ? !target.isFavorite : true;
+      const isCurrentlyFav =
+        allTracksRef.current.find((t) => t.id === trackId)?.isFavorite ??
+        target?.isFavorite ??
+        false;
+      const nextFav = !isCurrentlyFav;
 
       const updateList = (list: TrackItem[]) =>
         list.map((t) => (t.id === trackId ? { ...t, isFavorite: nextFav } : t));
@@ -857,6 +863,36 @@ export const App: React.FC = () => {
     handleToggleMute,
     handleToggleFavorite,
   ]);
+
+  // Автоматически восстанавливаем метаданные для старых онлайн-треков в избранном, если они сохранились без названия
+  useEffect(() => {
+    if (!yandexAuth.isAuthorized) return;
+    const brokenIds = savedOnlineFavs
+      .filter((t) => t.title === 'Трек' && t.artist === 'Яндекс Музыка' && t.durationSeconds === 0)
+      .map((t) => t.id);
+
+    if (brokenIds.length === 0) return;
+
+    let cancelled = false;
+    tauriApi
+      .resolveYandexTracks(brokenIds)
+      .then((resolved) => {
+        if (cancelled || resolved.length === 0) return;
+        const resolvedMap = new Map(resolved.map((t) => [t.id, { ...t, isFavorite: true }]));
+        setSavedOnlineFavs((prev) => {
+          const updated = prev.map((t) => resolvedMap.get(t.id) ?? t);
+          try {
+            localStorage.setItem('abyss-online-favs', JSON.stringify(updated));
+          } catch {}
+          return updated;
+        });
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [yandexAuth.isAuthorized]);
 
   const favoriteIds = useMemo(() => {
     const set = new Set<string>(savedOnlineFavs.map((t) => t.id));
@@ -1354,10 +1390,21 @@ export const App: React.FC = () => {
                 <div className="wave-controls">
                   <button
                     className={`wave-play-btn ${isLoadingStream ? 'is-loading' : ''}`}
-                    onClick={() => handleStartWave()}
+                    onClick={() => {
+                      // Если волна уже играет — ставим на паузу или продолжаем, а не запускаем заново
+                      if (isWaveActive && syncedCurrentTrack) {
+                        void handleTogglePlay();
+                      } else {
+                        void handleStartWave();
+                      }
+                    }}
                     disabled={isLoadingStream}
                     title={
-                      yandexAuth.isAuthorized
+                      isWaveActive && syncedCurrentTrack
+                        ? playbackStatus.isPlaying
+                          ? 'Пауза'
+                          : 'Продолжить волну'
+                        : yandexAuth.isAuthorized
                         ? 'Запустить новую волну'
                         : 'Войти через Яндекс ID'
                     }
@@ -1842,7 +1889,7 @@ export const App: React.FC = () => {
         onNext={() => handleNextTrack(false)}
         onSeek={handleSeek}
         onVolumeChange={handleVolumeChange}
-        onToggleFavorite={handleToggleFavorite}
+        onToggleFavorite={(id) => handleToggleFavorite(id, syncedCurrentTrack ?? undefined)}
         onSelectArtist={openArtistPage}
         onOpenNowPlaying={() => syncedCurrentTrack && setIsNowPlayingOpen(true)}
       />
@@ -1897,7 +1944,7 @@ export const App: React.FC = () => {
         onSeek={handleSeek}
         onVolumeChange={handleVolumeChange}
         onToggleMute={handleToggleMute}
-        onToggleFavorite={handleToggleFavorite}
+        onToggleFavorite={(id) => handleToggleFavorite(id, syncedCurrentTrack ?? undefined)}
         onSelectArtist={openArtistPage}
         onOpenEq={() => setIsEqOpen(true)}
       />

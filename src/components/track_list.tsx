@@ -8,7 +8,7 @@ interface TrackListProps {
   currentTrackId: string | null;
   isPlaying: boolean;
   onSelectTrack: (track: TrackItem) => void;
-  onToggleFavorite: (trackId: string) => void;
+  onToggleFavorite: (trackId: string, track?: TrackItem) => void;
   onSelectArtist?: (artistName: string) => void;
   onSelectAlbum?: (albumName: string) => void;
 }
@@ -60,7 +60,7 @@ const TrackMiniCover: React.FC<{ track: TrackItem }> = ({ track }) => {
   );
 };
 
-export const TrackList: React.FC<TrackListProps> = ({
+export const TrackList: React.FC<TrackListProps> = React.memo(({
   tracks,
   currentTrackId,
   isPlaying,
@@ -196,7 +196,7 @@ export const TrackList: React.FC<TrackListProps> = ({
                 <button
                   type="button"
                   className="icon-ghost-btn"
-                  onClick={() => onToggleFavorite(track.id)}
+                  onClick={() => onToggleFavorite(track.id, track)}
                 >
                   <Heart
                     size={16}
@@ -211,4 +211,4 @@ export const TrackList: React.FC<TrackListProps> = ({
       </tbody>
     </table>
   );
-};
+});

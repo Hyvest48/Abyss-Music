@@ -89,6 +89,8 @@ struct EqualizerSource<S> {
     coeffs: [BiquadCoeffs; 5],
     states: [[BiquadState; 5]; 8],
     channel_idx: usize,
+    sample_counter: u32,
+    local_level: f32,
     sample_rate: u32,
     channels: u16,
 }
@@ -110,6 +112,8 @@ where
             coeffs,
             states: [[BiquadState::default(); 5]; 8],
             channel_idx: 0,
+            sample_counter: 0,
+            local_level: 0.0,
             sample_rate,
             channels,
         }
@@ -148,13 +152,16 @@ where
         self.channel_idx = (self.channel_idx + 1) % (self.channels as usize);
 
         let abs_val = (raw as f32).abs() / 32768.0;
-        let prev_level = f32::from_bits(CURRENT_AUDIO_LEVEL.load(Ordering::Relaxed));
-        let next_level = if abs_val > prev_level {
-            prev_level * 0.85 + abs_val * 0.15
+        self.local_level = if abs_val > self.local_level {
+            self.local_level * 0.85 + abs_val * 0.15
         } else {
-            prev_level * 0.9992 + abs_val * 0.0008
+            self.local_level * 0.9992 + abs_val * 0.0008
         };
-        CURRENT_AUDIO_LEVEL.store(next_level.to_bits(), Ordering::Relaxed);
+        // Обновляем атомарный уровень раз в 64 сэмпла, чтобы не нагружать шину на каждом сэмпле
+        self.sample_counter = self.sample_counter.wrapping_add(1);
+        if self.sample_counter & 63 == 0 {
+            CURRENT_AUDIO_LEVEL.store(self.local_level.to_bits(), Ordering::Relaxed);
+        }
 
         if self.cached_gains.iter().all(|g| g.abs() < 0.05) {
             return Some(raw);
@@ -264,13 +271,9 @@ impl AudioPlayer {
                             let reader: Box<dyn ReadSeek> = if resolved_source.starts_with("http://")
                                 || resolved_source.starts_with("https://")
                             {
-                                let client = reqwest::blocking::Client::builder()
-                                    .no_proxy()
-                                    .timeout(Duration::from_secs(20))
-                                    .build()
-                                    .map_err(|e| format!("Ошибка HTTP-клиента: {}", e))?;
-                                let bytes = client
+                                let bytes = providers::shared_http_client()
                                     .get(&resolved_source)
+                                    .timeout(Duration::from_secs(20))
                                     .send()
                                     .map_err(|e| format!("Ошибка загрузки потока: {}", e))?
                                     .bytes()
@@ -384,7 +387,11 @@ impl AudioPlayer {
         self.eq_gains.lock().map(|g| *g).unwrap_or([0.0; 5])
     }
 
-    pub fn play_file(&self, path: &str, ym_token: Option<&str>) -> Result<(), String> {
+    pub fn play_file_async_prep(
+        &self,
+        path: &str,
+        ym_token: Option<&str>,
+    ) -> Result<mpsc::Receiver<Result<(), String>>, String> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.tx
             .send(AudioCommand::Play {
@@ -393,7 +400,7 @@ impl AudioPlayer {
                 reply: reply_tx,
             })
             .map_err(|e| e.to_string())?;
-        reply_rx.recv().map_err(|e| e.to_string())?
+        Ok(reply_rx)
     }
 
     pub fn pause(&self) {

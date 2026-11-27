@@ -64,6 +64,11 @@ export const tauriApi = {
     return invoke<YandexSearchResult>('search_yandex_all', { query });
   },
 
+  resolveYandexTracks: async (trackIds: string[]): Promise<TrackItem[]> => {
+    if (trackIds.length === 0) return [];
+    return invoke<TrackItem[]>('resolve_yandex_tracks', { trackIds });
+  },
+
   getYandexWave: (
     settings: WaveSettings,
     queueTrackId: string | null = null
