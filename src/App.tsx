@@ -31,6 +31,7 @@ import { SeasonalEffects } from './components/seasonal_effects';
 import { EqualizerModal } from './components/equalizer_modal';
 import { ArtistView } from './components/artist_view';
 import { ArtistLinks } from './components/artist_links';
+import { SplashScreen } from './components/splash_screen';
 import { THEME_PRESETS, ThemePreset } from './shared/themes';
 import {
   PlaybackStatus,
@@ -129,6 +130,8 @@ export const App: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoadingStream, setIsLoadingStream] = useState(false);
   const [isSearchingApi, setIsSearchingApi] = useState(false);
+  const [isAppReady, setIsAppReady] = useState(false);
+  const [splashStatus, setSplashStatus] = useState('Инициализация аудиодвижка...');
   const [renderLimit, setRenderLimit] = useState(INITIAL_RENDER_LIMIT);
 
   const [yandexAuth, setYandexAuth] = useState<YandexAuthStatus>({
@@ -289,6 +292,7 @@ export const App: React.FC = () => {
 
     const initData = async () => {
       try {
+        setSplashStatus('Загрузка медиатеки и профиля...');
         const [savedTracks, savedPlaylists, ymStatus] = await Promise.all([
           tauriApi.getTracks(),
           tauriApi.getPlaylists(),
@@ -298,6 +302,11 @@ export const App: React.FC = () => {
         setTracks(savedTracks);
         setPlaylists(savedPlaylists);
         setYandexAuth(ymStatus);
+        setSplashStatus(
+          ymStatus.isAuthorized
+            ? `Добро пожаловать, ${ymStatus.accountName || 'слушатель'}`
+            : 'Готово к запуску'
+        );
 
         const fn = await tauriApi.onYandexAuthSuccess((status) => {
           setYandexAuth(status);
@@ -310,6 +319,9 @@ export const App: React.FC = () => {
         unlistenAuth = fn;
       } catch (err) {
         console.error('Ошибка инициализации данных:', err);
+        setSplashStatus('Готово');
+      } finally {
+        if (!disposed) setIsAppReady(true);
       }
     };
 
@@ -1329,6 +1341,7 @@ export const App: React.FC = () => {
 
   return (
     <div className="app-shell">
+      <SplashScreen isReady={isAppReady} statusText={splashStatus} />
       <div
         ref={bloomRef}
         className="cursor-bloom"

@@ -2247,3 +2247,213 @@ img.track-mini-cover {
 [data-theme='summer'] .app-shell::before {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='84' height='84' viewBox='0 0 84 84'%3E%3Cpath d='M0 42 Q21 28 42 42 T84 42' fill='none' stroke='%23fde047' stroke-width='1.2'/%3E%3C/svg%3E");
 }
+
+/* ===== ЭКРАН ЗАГРУЗКИ (ANTIGRAVITY SPLASH) ===== */
+@keyframes splashLevitate {
+  0%, 100% {
+    transform: translateY(0px);
+    filter: drop-shadow(0 12px 28px var(--accent-glow));
+  }
+  50% {
+    transform: translateY(-9px);
+    filter: drop-shadow(0 22px 38px var(--accent-glow));
+  }
+}
+
+@keyframes splashParticleRise {
+  0% {
+    transform: translateY(40vh) scale(0.6);
+    opacity: 0;
+  }
+  20% {
+    opacity: 0.7;
+  }
+  80% {
+    opacity: 0.45;
+  }
+  100% {
+    transform: translateY(-45vh) scale(1.1);
+    opacity: 0;
+  }
+}
+
+@keyframes splashPulseGlow {
+  0%, 100% {
+    transform: scale(0.92);
+    opacity: 0.38;
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: 0.65;
+  }
+}
+
+@keyframes splashFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.splash-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  background: radial-gradient(circle at 50% 46%, #111118 0%, #070709 72%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  transition:
+    opacity 0.46s var(--ease-out-expo),
+    transform 0.48s var(--ease-out-expo),
+    filter 0.46s ease;
+}
+
+.splash-overlay.is-exiting {
+  opacity: 0;
+  transform: scale(1.03);
+  filter: blur(8px);
+  pointer-events: none;
+}
+
+.splash-ambient-glow {
+  position: absolute;
+  width: 380px;
+  height: 380px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
+  filter: blur(60px);
+  animation: splashPulseGlow 3.6s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.splash-particles {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.splash-particle {
+  position: absolute;
+  bottom: 20%;
+  border-radius: 50%;
+  background: radial-gradient(circle, #ffffff 0%, var(--accent-warm) 100%);
+  animation-name: splashParticleRise;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+.splash-core {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  animation: splashFadeIn 0.5s var(--ease-out-expo) both;
+}
+
+.splash-logo-float {
+  margin-bottom: 18px;
+  animation: splashLevitate 2.8s ease-in-out infinite;
+}
+
+.splash-title {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 0.22em;
+  text-indent: 0.22em;
+  line-height: 1;
+  background: linear-gradient(
+    110deg,
+    rgba(255, 255, 255, 0.9) 0%,
+    #ffffff 45%,
+    var(--accent-warm) 80%,
+    rgba(255, 255, 255, 0.9) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: brandShimmer 2.8s linear infinite;
+}
+
+.splash-status {
+  margin-top: 14px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
+/* ===== РАСШИРЕННЫЕ АНИМАЦИИ НА ВСЕ ЭЛЕМЕНТЫ ===== */
+@keyframes coverBreathe {
+  0%, 100% {
+    box-shadow: 0 28px 60px -12px rgba(0, 0, 0, 0.72), 0 0 0 0 var(--accent-glow);
+  }
+  50% {
+    box-shadow: 0 32px 70px -10px rgba(0, 0, 0, 0.8), 0 0 42px -4px var(--accent-glow);
+  }
+}
+
+.now-playing-cover-wrap.is-playing {
+  animation: coverBreathe 3.6s ease-in-out infinite;
+}
+
+.track-row {
+  transition: transform 0.2s var(--ease-spring), background 0.18s ease;
+}
+
+.track-row:hover {
+  transform: translateX(3px);
+}
+
+.track-row:active {
+  transform: scale(0.992);
+}
+
+.track-mini-cover,
+.recent-thumb {
+  transition: transform 0.24s var(--ease-spring), box-shadow 0.24s ease;
+}
+
+.track-row:hover .track-mini-cover,
+.recent-card:hover .recent-thumb {
+  transform: scale(1.06);
+}
+
+.entity-card {
+  animation: fadeSlideUp 0.35s var(--ease-out-expo) both;
+}
+
+.entity-card-cover {
+  transition: transform 0.28s var(--ease-spring), box-shadow 0.28s ease;
+}
+
+.entity-card:hover .entity-card-cover {
+  transform: scale(1.04);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.5), 0 0 22px -6px var(--accent-glow);
+}
+
+.entity-card:active {
+  transform: scale(0.97);
+}
+
+.collection-banner {
+  animation: fadeSlideUp 0.38s var(--ease-out-expo) both;
+}
+
+.btn-primary-pill:active,
+.wave-settings-btn:active,
+.chip-btn:active,
+.theme-card:active {
+  transform: scale(0.95);
+}
+
+.entity-hero {
+  animation: fadeSlideUp 0.38s var(--ease-out-expo) both;
+}
