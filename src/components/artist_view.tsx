@@ -187,7 +187,7 @@ export const ArtistView: React.FC<ArtistViewProps> = ({
   };
 
   const applyFavs = (list: TrackItem[]) =>
-    list.map((t) => (favoriteIds.has(t.id) ? { ...t, isFavorite: true } : t));
+    list.map((t) => ({ ...t, isFavorite: favoriteIds.has(t.id) }));
 
   const mergedAllTracks = useMemo(() => {
     const cleanTarget = artistName.toLowerCase();
@@ -227,7 +227,7 @@ export const ArtistView: React.FC<ArtistViewProps> = ({
     }
     for (const lt of localTracks) {
       if (lt.artist.toLowerCase().includes(cleanTarget) && !map.has(lt.id)) {
-        map.set(lt.id, favoriteIds.has(lt.id) ? { ...lt, isFavorite: true } : lt);
+        map.set(lt.id, { ...lt, isFavorite: favoriteIds.has(lt.id) });
       }
     }
     return Array.from(map.values());

@@ -1,6 +1,6 @@
 [package]
 name = "abyss-music"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 [lib]
@@ -11,7 +11,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -19,6 +19,15 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 rodio = "0.19"
 lofty = "0.21"
 walkdir = "2"
-reqwest = { version = "0.12", features = ["blocking", "json"] }
 md5 = "0.7"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+reqwest = { version = "0.12", features = ["blocking", "json"] }
 souvlaki = "0.8"
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"

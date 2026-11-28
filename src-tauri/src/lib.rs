@@ -5,17 +5,24 @@ mod media_controls;
 mod models;
 mod providers;
 mod scanner;
+mod sync;
 
 use std::sync::Mutex;
 use rusqlite::Connection;
 use serde::Serialize;
-use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, State};
+#[cfg(desktop)]
+use tauri::{WebviewUrl, WebviewWindowBuilder};
+#[cfg(desktop)]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+#[cfg(desktop)]
 use tauri::menu::{Menu, MenuItem};
 use audio::AudioPlayer;
+use db::{FrontendSyncPrefs, SyncImportSummary};
 use media_controls::MediaControlsManager;
 use models::{PlaybackStatus, PlaylistItem, TrackItem};
 use providers::{ArtistProfile, TrackLyrics, YandexSearchResult};
+use sync::{DiscoveredSyncDevice, LanSyncHostInfo};
 
 pub struct AppState {
     pub db: Mutex<Connection>,
@@ -58,12 +65,14 @@ fn persist_yandex_token(app: &tauri::AppHandle, raw_token: &str) {
             },
         );
 
+        #[cfg(desktop)]
         if let Some(win) = app_handle.get_webview_window("yandex-auth") {
             let _ = win.close();
         }
     });
 }
 
+#[cfg(desktop)]
 fn is_allowed_yandex_auth_url(url: &tauri::Url) -> bool {
     let url_str = url.as_str();
     if url_str == "about:blank" || url_str.starts_with("https://abyss-auth-callback.local/") {
@@ -142,6 +151,7 @@ fn logout_yandex(state: State<AppState>) -> Result<(), String> {
     db::delete_setting(&conn, "yandex_token")
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 async fn open_yandex_auth(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(existing) = app.get_webview_window("yandex-auth") {
@@ -210,6 +220,30 @@ async fn open_yandex_auth(app: tauri::AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+#[cfg(not(desktop))]
+#[tauri::command]
+async fn open_yandex_auth(_app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        if let Some(vm) = ANDROID_VM.get() {
+            let activity_opt = ANDROID_ACTIVITY.lock().ok().and_then(|g| g.as_ref().cloned());
+            if let Some(activity_ref) = activity_opt {
+                let mut env = vm
+                    .attach_current_thread()
+                    .map_err(|_| "MOBILE_OAUTH_UNSUPPORTED".to_string())?;
+                env.call_method(activity_ref.as_obj(), "openYandexAuthDialog", "()V", &[])
+                    .map_err(|e| {
+                        let _ = env.exception_describe();
+                        let _ = env.exception_clear();
+                        format!("MOBILE_OAUTH_UNSUPPORTED: {}", e)
+                    })?;
+                return Ok(());
+            }
+        }
+    }
+    Err("MOBILE_OAUTH_UNSUPPORTED".to_string())
 }
 
 #[tauri::command]
@@ -525,6 +559,7 @@ fn update_media_playback(
     Ok(())
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 async fn toggle_desktop_widget(
     app: tauri::AppHandle,
@@ -641,11 +676,13 @@ async fn toggle_desktop_widget(
     Ok(true)
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn is_desktop_widget_open(app: tauri::AppHandle) -> bool {
     app.get_webview_window("widget").is_some()
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn set_widget_pinned(app: tauri::AppHandle, pinned: bool) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("widget") {
@@ -654,6 +691,7 @@ fn set_widget_pinned(app: tauri::AppHandle, pinned: bool) -> Result<(), String> 
     Ok(())
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn close_desktop_widget(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("widget") {
@@ -663,6 +701,7 @@ fn close_desktop_widget(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn get_desktop_widget_pos(app: tauri::AppHandle) -> Result<(i32, i32), String> {
     let win = app
@@ -672,11 +711,48 @@ fn get_desktop_widget_pos(app: tauri::AppHandle) -> Result<(i32, i32), String> {
     Ok((pos.x, pos.y))
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn move_desktop_widget(app: tauri::AppHandle, x: i32, y: i32) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("widget") {
         let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
     }
+    Ok(())
+}
+
+#[cfg(not(desktop))]
+#[tauri::command]
+async fn toggle_desktop_widget(_app: tauri::AppHandle) -> Result<bool, String> {
+    Ok(false)
+}
+
+#[cfg(not(desktop))]
+#[tauri::command]
+fn is_desktop_widget_open(_app: tauri::AppHandle) -> bool {
+    false
+}
+
+#[cfg(not(desktop))]
+#[tauri::command]
+fn set_widget_pinned(_app: tauri::AppHandle, _pinned: bool) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(desktop))]
+#[tauri::command]
+fn close_desktop_widget(_app: tauri::AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(desktop))]
+#[tauri::command]
+fn get_desktop_widget_pos(_app: tauri::AppHandle) -> Result<(i32, i32), String> {
+    Ok((0, 0))
+}
+
+#[cfg(not(desktop))]
+#[tauri::command]
+fn move_desktop_widget(_app: tauri::AppHandle, _x: i32, _y: i32) -> Result<(), String> {
     Ok(())
 }
 
@@ -715,6 +791,16 @@ fn get_playback_status(state: State<AppState>) -> Result<PlaybackStatus, String>
 fn toggle_favorite(track_id: String, state: State<AppState>) -> Result<bool, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     db::toggle_favorite(&conn, &track_id)
+}
+
+#[tauri::command]
+fn set_track_favorite(
+    track_id: String,
+    is_favorite: bool,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::set_track_favorite(&conn, &track_id, is_favorite)
 }
 
 #[tauri::command]
@@ -836,17 +922,330 @@ fn load_queue_state(state: State<AppState>) -> Result<Option<QueueStatePayload>,
     }))
 }
 
+// ─── Синхронизация и перенос БД (Wi-Fi LAN + JSON бэкап) ────────────────────
+
+fn apply_imported_audio_settings(conn: &Connection, state: &State<AppState>) {
+    if let Ok(player) = state.player.lock() {
+        if let Ok(Some(saved_eq)) = db::get_setting(conn, "eq_gains") {
+            if let Ok(arr) = serde_json::from_str::<[f32; 5]>(&saved_eq) {
+                player.set_eq_gains(arr);
+            }
+        }
+        if let Ok(Some(saved_cf)) = db::get_setting(conn, "crossfade_ms") {
+            if let Ok(ms) = saved_cf.parse::<u32>() {
+                player.set_crossfade_ms(ms);
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn export_sync_snapshot_json(
+    frontend_prefs: FrontendSyncPrefs,
+    state: State<AppState>,
+) -> Result<String, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let dev = sync::get_device_name();
+    let snap = db::export_sync_snapshot(&conn, &dev, frontend_prefs)?;
+    serde_json::to_string_pretty(&snap).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn import_sync_snapshot_json(
+    snapshot_json: String,
+    state: State<AppState>,
+) -> Result<SyncImportSummary, String> {
+    let snapshot: db::AbyssSyncSnapshot = serde_json::from_str(&snapshot_json)
+        .map_err(|e| format!("Некорректный файл синхронизации: {}", e))?;
+    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    let summary = db::import_sync_snapshot(&mut conn, &snapshot)?;
+    apply_imported_audio_settings(&conn, &state);
+    Ok(summary)
+}
+
+#[tauri::command]
+fn start_lan_sync_host(
+    app: tauri::AppHandle,
+    frontend_prefs: FrontendSyncPrefs,
+    state: State<AppState>,
+) -> Result<LanSyncHostInfo, String> {
+    let snapshot = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let dev = sync::get_device_name();
+        db::export_sync_snapshot(&conn, &dev, frontend_prefs)?
+    };
+    sync::start_lan_host(app, &snapshot)
+}
+
+#[tauri::command]
+fn stop_lan_sync_host() {
+    sync::stop_lan_host();
+}
+
+#[tauri::command]
+async fn discover_lan_sync_hosts() -> Result<Vec<DiscoveredSyncDevice>, String> {
+    tauri::async_runtime::spawn_blocking(sync::discover_lan_hosts)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn pull_lan_sync_snapshot(
+    ip: String,
+    port: u16,
+    pin: String,
+    state: State<'_, AppState>,
+) -> Result<SyncImportSummary, String> {
+    let snapshot = tauri::async_runtime::spawn_blocking(move || {
+        sync::fetch_lan_snapshot(&ip, port, &pin)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    let summary = db::import_sync_snapshot(&mut conn, &snapshot)?;
+    apply_imported_audio_settings(&conn, &state);
+    Ok(summary)
+}
+
+#[tauri::command]
+async fn cloud_sync_push(
+    frontend_prefs: FrontendSyncPrefs,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let (token, snapshot) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let token = db::get_setting(&conn, "yandex_token")?.unwrap_or_default();
+        if token.trim().is_empty() {
+            return Err("Войдите в Яндекс ID для облачной синхронизации".to_string());
+        }
+        let dev = sync::get_device_name();
+        let snap = db::export_sync_snapshot(&conn, &dev, frontend_prefs)?;
+        (token, snap)
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let uid = providers::get_yandex_account_uid(&token)?;
+        sync::cloud_push_snapshot(&uid, &snapshot)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn cloud_sync_pull(
+    state: State<'_, AppState>,
+) -> Result<Option<SyncImportSummary>, String> {
+    let token = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::get_setting(&conn, "yandex_token")?.unwrap_or_default()
+    };
+    if token.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let snapshot_opt = tauri::async_runtime::spawn_blocking(move || {
+        let uid = providers::get_yandex_account_uid(&token)?;
+        sync::cloud_pull_snapshot(&uid)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let Some(snapshot) = snapshot_opt else {
+        return Ok(None);
+    };
+
+    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    let summary = db::import_sync_snapshot(&mut conn, &snapshot)?;
+    apply_imported_audio_settings(&conn, &state);
+    Ok(Some(summary))
+}
+
+// ─── Android JNI & инициализация ─────────────────────────────────────────────
+
+#[cfg(target_os = "android")]
+static ANDROID_FILES_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+static ANDROID_VM: std::sync::OnceLock<jni::JavaVM> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+static ANDROID_ACTIVITY: Mutex<Option<jni::objects::GlobalRef>> = Mutex::new(None);
+
+#[cfg(target_os = "android")]
+static ANDROID_APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+fn install_android_panic_hook() {
+    static HOOK_ONCE: std::sync::Once = std::sync::Once::new();
+    HOOK_ONCE.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            let msg = format!("ABYSS RUST PANIC: {}", info);
+            if let Ok(cstr) = std::ffi::CString::new(msg) {
+                extern "C" {
+                    fn __android_log_write(
+                        prio: i32,
+                        tag: *const std::ffi::c_char,
+                        text: *const std::ffi::c_char,
+                    ) -> i32;
+                }
+                let tag = b"AbyssMusic\0";
+                unsafe {
+                    __android_log_write(6, tag.as_ptr().cast(), cstr.as_ptr().cast());
+                }
+            }
+        }));
+    });
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_com_abyssmusic_player_MainActivity_initNdkContext(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    activity: jni::objects::JObject,
+    files_dir: jni::objects::JString,
+) {
+    install_android_panic_hook();
+
+    if let Ok(vm) = env.get_java_vm() {
+        let _ = ANDROID_VM.set(vm);
+    }
+
+    if let Ok(global_activity) = env.new_global_ref(activity) {
+        if let Ok(mut slot) = ANDROID_ACTIVITY.lock() {
+            *slot = Some(global_activity);
+        }
+    }
+
+    if let Ok(path_str) = env.get_string(&files_dir) {
+        let p = std::path::PathBuf::from(path_str.to_string_lossy().as_ref());
+        let _ = ANDROID_FILES_DIR.set(p);
+    }
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_com_abyssmusic_player_MainActivity_onYandexToken(
+    mut env: jni::JNIEnv,
+    _obj: jni::objects::JObject,
+    token: jni::objects::JString,
+) {
+    let Ok(token_str) = env.get_string(&token) else {
+        return;
+    };
+    let clean_token = token_str.to_string_lossy().to_string();
+    if let Some(app) = ANDROID_APP_HANDLE.get() {
+        persist_yandex_token(app, &clean_token);
+    }
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_com_abyssmusic_player_MainActivity_onMediaAction(
+    mut env: jni::JNIEnv,
+    _obj: jni::objects::JObject,
+    action: jni::objects::JString,
+) {
+    let Ok(action_str) = env.get_string(&action) else {
+        return;
+    };
+    let act = action_str.to_string_lossy().to_string();
+    if let Some(app) = ANDROID_APP_HANDLE.get() {
+        let _ = app.emit("media-control", act);
+    }
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn android_call_media_metadata(
+    title: &str,
+    artist: &str,
+    album: &str,
+    cover_url: &str,
+    duration_sec: u64,
+) {
+    let Some(vm) = ANDROID_VM.get() else {
+        return;
+    };
+    let Some(activity_ref) = ANDROID_ACTIVITY.lock().ok().and_then(|g| g.as_ref().cloned()) else {
+        return;
+    };
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return;
+    };
+    let Ok(j_title) = env.new_string(title) else { return };
+    let Ok(j_artist) = env.new_string(artist) else { return };
+    let Ok(j_album) = env.new_string(album) else { return };
+    let Ok(j_cover) = env.new_string(cover_url) else { return };
+    let _ = env.call_method(
+        activity_ref.as_obj(),
+        "updateMediaMetadata",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;J)V",
+        &[
+            jni::objects::JValue::Object(&j_title),
+            jni::objects::JValue::Object(&j_artist),
+            jni::objects::JValue::Object(&j_album),
+            jni::objects::JValue::Object(&j_cover),
+            jni::objects::JValue::Long(duration_sec as i64),
+        ],
+    );
+    let _ = env.exception_clear();
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn android_call_media_playback(is_playing: bool, position_sec: u64) {
+    let Some(vm) = ANDROID_VM.get() else {
+        return;
+    };
+    let Some(activity_ref) = ANDROID_ACTIVITY.lock().ok().and_then(|g| g.as_ref().cloned()) else {
+        return;
+    };
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return;
+    };
+    let _ = env.call_method(
+        activity_ref.as_obj(),
+        "updateMediaPlayback",
+        "(ZJ)V",
+        &[
+            jni::objects::JValue::Bool(if is_playing { 1 } else { 0 }),
+            jni::objects::JValue::Long(position_sec as i64),
+        ],
+    );
+    let _ = env.exception_clear();
+}
+
+fn resolve_app_data_dir(
+    #[allow(unused_variables)] app: &tauri::AppHandle,
+) -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "android")]
+    {
+        if let Some(dir) = ANDROID_FILES_DIR.get() {
+            return Ok(dir.clone());
+        }
+        return Ok(std::path::PathBuf::from(
+            "/data/user/0/com.abyssmusic.player/files",
+        ));
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        app.path().app_data_dir().map_err(|e| e.to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "android")]
+    install_android_panic_hook();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
-            let app_dir = app.path().app_data_dir().expect("Не найден каталог данных");
+            let app_dir = resolve_app_data_dir(app.handle())?;
             let cache_dir = app_dir.join("audio_cache");
-            let audio_player =
-                AudioPlayer::new(cache_dir).expect("Не удалось инициализировать аудиодвижок");
+            let audio_player = AudioPlayer::new(cache_dir)?;
 
-            let conn = db::init_database(app.handle()).expect("Ошибка инициализации SQLite");
+            let conn = db::init_database_at(&app_dir)?;
             if let Ok(Some(saved_eq)) = db::get_setting(&conn, "eq_gains") {
                 if let Ok(arr) = serde_json::from_str::<[f32; 5]>(&saved_eq) {
                     audio_player.set_eq_gains(arr);
@@ -874,77 +1273,87 @@ pub fn run() {
                 media: media_controls,
             });
 
-            // ── Глобальные горячие клавиши ───────────────────────────────────
-            global_hotkeys::start_global_hotkeys(app.handle().clone());
+            #[cfg(target_os = "android")]
+            {
+                let _ = ANDROID_APP_HANDLE.set(app.handle().clone());
+            }
 
-            // ── Системный трей ────────────────────────────────────────────────
-            let show_item = MenuItem::with_id(app, "show", "Открыть Abyss Music", true, None::<&str>)?;
-            let toggle_item = MenuItem::with_id(app, "toggle", "Пауза / Играть", true, None::<&str>)?;
-            let next_item = MenuItem::with_id(app, "next", "Следующий трек", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "Выйти", true, None::<&str>)?;
-            let tray_menu =
-                Menu::with_items(app, &[&show_item, &toggle_item, &next_item, &quit_item])?;
+            // ── Глобальные горячие клавиши и системный трей (только Desktop) ──
+            #[cfg(desktop)]
+            {
+                global_hotkeys::start_global_hotkeys(app.handle().clone());
 
-            let mut tray_builder = TrayIconBuilder::new()
-                .tooltip("Abyss Music")
-                .menu(&tray_menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(move |app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(win) = app.get_webview_window("main") {
-                            let _ = win.show();
-                            let _ = win.unminimize();
-                            let _ = win.set_focus();
-                        }
-                    }
-                    "toggle" => {
-                        let _ = app.emit("media-control", "toggle");
-                    }
-                    "next" => {
-                        let _ = app.emit("media-control", "next");
-                    }
-                    "quit" => {
-                        app.exit(0);
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let app = tray.app_handle();
-                        if let Some(win) = app.get_webview_window("main") {
-                            if win.is_visible().unwrap_or(false) {
-                                let _ = win.hide();
-                            } else {
+                let show_item =
+                    MenuItem::with_id(app, "show", "Открыть Abyss Music", true, None::<&str>)?;
+                let toggle_item =
+                    MenuItem::with_id(app, "toggle", "Пауза / Играть", true, None::<&str>)?;
+                let next_item =
+                    MenuItem::with_id(app, "next", "Следующий трек", true, None::<&str>)?;
+                let quit_item = MenuItem::with_id(app, "quit", "Выйти", true, None::<&str>)?;
+                let tray_menu =
+                    Menu::with_items(app, &[&show_item, &toggle_item, &next_item, &quit_item])?;
+
+                let mut tray_builder = TrayIconBuilder::new()
+                    .tooltip("Abyss Music")
+                    .menu(&tray_menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(move |app, event| match event.id.as_ref() {
+                        "show" => {
+                            if let Some(win) = app.get_webview_window("main") {
                                 let _ = win.show();
                                 let _ = win.unminimize();
                                 let _ = win.set_focus();
                             }
                         }
-                    }
-                });
-
-            if let Some(icon) = app.default_window_icon().cloned() {
-                tray_builder = tray_builder.icon(icon);
-            }
-            let tray = tray_builder.build(app)?;
-            app.manage(tray);
-
-            // При закрытии главного окна — прятать в трей вместо выхода
-            if let Some(main_win) = app.get_webview_window("main") {
-                let app_handle_close = app.handle().clone();
-                main_win.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        if let Some(w) = app_handle_close.get_webview_window("main") {
-                            let _ = w.hide();
+                        "toggle" => {
+                            let _ = app.emit("media-control", "toggle");
                         }
-                    }
-                });
+                        "next" => {
+                            let _ = app.emit("media-control", "next");
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            let app = tray.app_handle();
+                            if let Some(win) = app.get_webview_window("main") {
+                                if win.is_visible().unwrap_or(false) {
+                                    let _ = win.hide();
+                                } else {
+                                    let _ = win.show();
+                                    let _ = win.unminimize();
+                                    let _ = win.set_focus();
+                                }
+                            }
+                        }
+                    });
+
+                if let Some(icon) = app.default_window_icon().cloned() {
+                    tray_builder = tray_builder.icon(icon);
+                }
+                let tray = tray_builder.build(app)?;
+                app.manage(tray);
+
+                // При закрытии главного окна — прятать в трей вместо выхода
+                if let Some(main_win) = app.get_webview_window("main") {
+                    let app_handle_close = app.handle().clone();
+                    main_win.on_window_event(move |event| {
+                        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                            api.prevent_close();
+                            if let Some(w) = app_handle_close.get_webview_window("main") {
+                                let _ = w.hide();
+                            }
+                        }
+                    });
+                }
             }
 
             Ok(())
@@ -988,6 +1397,7 @@ pub fn run() {
             toggle_mute,
             get_playback_status,
             toggle_favorite,
+            set_track_favorite,
             get_playlists,
             create_playlist,
             add_track_to_playlist,
@@ -1000,7 +1410,15 @@ pub fn run() {
             add_artist_listening_time,
             get_artist_listening_time,
             save_queue_state,
-            load_queue_state
+            load_queue_state,
+            export_sync_snapshot_json,
+            import_sync_snapshot_json,
+            start_lan_sync_host,
+            stop_lan_sync_host,
+            discover_lan_sync_hosts,
+            pull_lan_sync_snapshot,
+            cloud_sync_push,
+            cloud_sync_pull
         ])
         .run(tauri::generate_context!())
         .expect("Ошибка запуска Abyss Music");

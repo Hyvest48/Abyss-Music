@@ -33,6 +33,38 @@ export interface QueueStatePayload {
   queueTracks?: TrackItem[];
 }
 
+export interface FrontendSyncPrefs {
+  themeId?: string | null;
+  isNightMode?: boolean | null;
+  waveSettings?: WaveSettings | null;
+  onlineFavs: TrackItem[];
+  likedArtists: string[];
+}
+
+export interface SyncImportSummary {
+  sourceDevice: string;
+  tracksImported: number;
+  playlistsImported: number;
+  favoritesImported: number;
+  historyImported: number;
+  yandexTokenUpdated: boolean;
+  frontendPrefs: FrontendSyncPrefs;
+}
+
+export interface LanSyncHostInfo {
+  ip: string;
+  port: number;
+  pin: string;
+  deviceName: string;
+}
+
+export interface DiscoveredSyncDevice {
+  name: string;
+  ip: string;
+  port: number;
+  platform: string;
+}
+
 export async function pickMusicFolder(): Promise<string | null> {
   const selected = await open({
     directory: true,
@@ -190,6 +222,9 @@ export const tauriApi = {
   toggleFavorite: (trackId: string): Promise<boolean> =>
     invoke<boolean>('toggle_favorite', { trackId }),
 
+  setTrackFavorite: (trackId: string, isFavorite: boolean): Promise<void> =>
+    invoke<void>('set_track_favorite', { trackId, isFavorite }),
+
   getPlaylists: (): Promise<PlaylistItem[]> =>
     invoke<PlaylistItem[]>('get_playlists'),
 
@@ -232,4 +267,35 @@ export const tauriApi = {
 
   loadQueueState: (): Promise<QueueStatePayload | null> =>
     invoke<QueueStatePayload | null>('load_queue_state'),
+
+  exportSyncSnapshotJson: (frontendPrefs: FrontendSyncPrefs): Promise<string> =>
+    invoke<string>('export_sync_snapshot_json', { frontendPrefs }),
+
+  importSyncSnapshotJson: (snapshotJson: string): Promise<SyncImportSummary> =>
+    invoke<SyncImportSummary>('import_sync_snapshot_json', { snapshotJson }),
+
+  startLanSyncHost: (frontendPrefs: FrontendSyncPrefs): Promise<LanSyncHostInfo> =>
+    invoke<LanSyncHostInfo>('start_lan_sync_host', { frontendPrefs }),
+
+  stopLanSyncHost: (): Promise<void> => invoke<void>('stop_lan_sync_host'),
+
+  discoverLanSyncHosts: (): Promise<DiscoveredSyncDevice[]> =>
+    invoke<DiscoveredSyncDevice[]>('discover_lan_sync_hosts'),
+
+  pullLanSyncSnapshot: (
+    ip: string,
+    port: number,
+    pin: string
+  ): Promise<SyncImportSummary> =>
+    invoke<SyncImportSummary>('pull_lan_sync_snapshot', { ip, port, pin }),
+
+  onLanSyncStatus: (
+    callback: (event: { state: string; peer: string }) => void
+  ) => listen<{ state: string; peer: string }>('lan-sync-status', (ev) => callback(ev.payload)),
+
+  cloudSyncPush: (frontendPrefs: FrontendSyncPrefs): Promise<void> =>
+    invoke<void>('cloud_sync_push', { frontendPrefs }),
+
+  cloudSyncPull: (): Promise<SyncImportSummary | null> =>
+    invoke<SyncImportSummary | null>('cloud_sync_pull'),
 };

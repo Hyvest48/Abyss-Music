@@ -1,9 +1,33 @@
 import React, { useState } from 'react';
-import { Home, Heart, Palette, Plus, FolderPlus, Music, LogIn, LogOut, UserCheck, Pencil, Trash2 } from 'lucide-react';
+import {
+  Home,
+  Search,
+  Heart,
+  Library,
+  Palette,
+  Sliders,
+  Plus,
+  FolderPlus,
+  Music,
+  LogIn,
+  LogOut,
+  UserCheck,
+  Pencil,
+  Trash2,
+} from 'lucide-react';
 import { PlaylistItem, getCoverGradient } from '../shared/models';
 import { YandexAuthStatus } from '../services/tauri_api';
 
-export type NavTab = 'home' | 'search' | 'favorites' | 'playlist';
+export type NavTab = 'home' | 'search' | 'favorites' | 'library' | 'playlist';
+
+function formatAccountName(name: string | null) {
+  if (!name) return 'Яндекс Плюс';
+  const parts = name.trim().split(/\s+/);
+  if (parts.length >= 2) {
+    return `${parts[0]} ${parts[1][0].toUpperCase()}.`;
+  }
+  return name;
+}
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -39,15 +63,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
 
-  const formatAccountName = (name: string | null) => {
-    if (!name) return 'Яндекс Плюс';
-    const parts = name.trim().split(/\s+/);
-    if (parts.length >= 2) {
-      return `${parts[0]} ${parts[1][0].toUpperCase()}.`;
-    }
-    return name;
-  };
-
   const commitRename = (id: string) => {
     const trimmed = editingName.trim();
     if (trimmed) {
@@ -55,6 +70,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     }
     setEditingId(null);
   };
+
   return (
     <aside className="sidebar">
       <div className="brand-block" onClick={() => onSelectTab('home')} style={{ cursor: 'pointer' }}>
@@ -240,5 +256,115 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       </div>
     </aside>
+  );
+};
+
+interface MobileTopBarProps {
+  yandexAuth: YandexAuthStatus;
+  onGoHome: () => void;
+  onOpenThemes: () => void;
+  onOpenEq: () => void;
+  onYandexLogin: () => void;
+  onYandexLogout: () => void;
+}
+
+export const MobileTopBar: React.FC<MobileTopBarProps> = ({
+  yandexAuth,
+  onGoHome,
+  onOpenThemes,
+  onOpenEq,
+  onYandexLogin,
+  onYandexLogout,
+}) => (
+  <header className="mobile-top-bar">
+    <button type="button" className="mobile-brand-btn" onClick={onGoHome}>
+      <span className="brand-title mobile-brand-title">ABYSS</span>
+    </button>
+
+    <div className="mobile-top-actions">
+      {yandexAuth.isAuthorized ? (
+        <div className="mobile-account-chip" title={yandexAuth.accountName || 'Яндекс ID'}>
+          <UserCheck size={14} style={{ color: 'var(--accent-warm)', flexShrink: 0 }} />
+          <span className="mobile-account-name">{formatAccountName(yandexAuth.accountName)}</span>
+          <button
+            type="button"
+            className="mobile-account-logout"
+            onClick={onYandexLogout}
+            title="Выйти"
+          >
+            <LogOut size={13} />
+          </button>
+        </div>
+      ) : (
+        <button type="button" className="mobile-login-chip" onClick={onYandexLogin}>
+          <LogIn size={14} style={{ color: '#fc3f1d' }} />
+          <span>Войти</span>
+        </button>
+      )}
+
+      <button type="button" className="mobile-top-icon-btn" onClick={onOpenEq} title="Эквалайзер">
+        <Sliders size={18} />
+      </button>
+
+      <button type="button" className="mobile-top-icon-btn" onClick={onOpenThemes} title="Темы">
+        <Palette size={18} />
+      </button>
+    </div>
+  </header>
+);
+
+interface MobileBottomNavProps {
+  activeTab: NavTab;
+  isSearching: boolean;
+  onSelectTab: (tab: NavTab) => void;
+}
+
+export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
+  activeTab,
+  isSearching,
+  onSelectTab,
+}) => {
+  const effectiveTab: NavTab = isSearching ? 'search' : activeTab;
+  const items: { id: NavTab; label: string; icon: React.ReactNode; active: boolean }[] = [
+    {
+      id: 'home',
+      label: 'Главная',
+      icon: <Home size={20} />,
+      active: effectiveTab === 'home',
+    },
+    {
+      id: 'search',
+      label: 'Поиск',
+      icon: <Search size={20} />,
+      active: effectiveTab === 'search',
+    },
+    {
+      id: 'favorites',
+      label: 'Избранное',
+      icon: <Heart size={20} />,
+      active: effectiveTab === 'favorites',
+    },
+    {
+      id: 'library',
+      label: 'Коллекция',
+      icon: <Library size={20} />,
+      active: effectiveTab === 'library' || effectiveTab === 'playlist',
+    },
+  ];
+
+  return (
+    <nav className="mobile-bottom-nav" aria-label="Навигация">
+      {items.map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          className={`mobile-nav-item ${item.active ? 'active' : ''}`}
+          onClick={() => onSelectTab(item.id)}
+        >
+          <span className="mobile-nav-icon">{item.icon}</span>
+          <span className="mobile-nav-label">{item.label}</span>
+        </button>
+      ))}
+    </nav>
   );
 };

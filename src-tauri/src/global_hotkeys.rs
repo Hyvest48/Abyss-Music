@@ -1,13 +1,15 @@
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 /// Запускает фоновый слушатель глобальных горячих клавиш (Windows):
 /// - Ctrl + Alt + Space : Play / Pause
 /// - Ctrl + Alt + Right : Следующий трек
 /// - Ctrl + Alt + Left  : Предыдущий трек
+#[allow(dead_code)]
 pub fn start_global_hotkeys(app: AppHandle) {
     #[cfg(target_os = "windows")]
     std::thread::spawn(move || {
         use std::mem::zeroed;
+        use tauri::Emitter;
 
         const MOD_ALT: u32 = 0x0001;
         const MOD_CONTROL: u32 = 0x0002;

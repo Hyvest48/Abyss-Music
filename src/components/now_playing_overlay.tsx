@@ -5,6 +5,9 @@ import {
   Pause,
   SkipBack,
   SkipForward,
+  Shuffle,
+  Repeat,
+  ListMusic,
   Heart,
   Music,
   MicVocal,
@@ -29,12 +32,18 @@ interface NowPlayingOverlayProps {
   isOpen: boolean;
   track: TrackItem | null;
   isPlaying: boolean;
+  isShuffle?: boolean;
+  isRepeat?: boolean;
+  isMobileUI?: boolean;
   positionSec: number;
   volume: number;
   isMuted: boolean;
   audioLevel?: number;
   onClose: () => void;
   onTogglePlay: () => void;
+  onToggleShuffle?: () => void;
+  onToggleRepeat?: () => void;
+  onOpenQueue?: () => void;
   onPrev: () => void;
   onNext: () => void;
   onSeek: (sec: number) => void;
@@ -66,12 +75,18 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
   isOpen,
   track,
   isPlaying,
+  isShuffle = false,
+  isRepeat = false,
+  isMobileUI = false,
   positionSec,
   volume,
   isMuted,
   audioLevel = 0,
   onClose,
   onTogglePlay,
+  onToggleShuffle,
+  onToggleRepeat,
+  onOpenQueue,
   onPrev,
   onNext,
   onSeek,
@@ -86,6 +101,7 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
   const [isInstrumental, setIsInstrumental] = useState(false);
   const [isLoadingLyrics, setIsLoadingLyrics] = useState(false);
   const [previewSec, setPreviewSec] = useState<number | null>(null);
+  const [mobileViewMode, setMobileViewMode] = useState<'player' | 'lyrics'>('player');
   const lyricsScrollRef = useRef<HTMLDivElement>(null);
   const activeLineRef = useRef<HTMLButtonElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -235,7 +251,11 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
   const resolvedCover = resolveCoverSrc(track.coverUrl);
 
   return (
-    <div className="now-playing-overlay">
+    <div
+      className={`now-playing-overlay ${isMobileUI ? 'np-mobile-ui' : ''} ${
+        mobileViewMode === 'lyrics' ? 'np-show-lyrics' : 'np-show-player'
+      }`}
+    >
       {resolvedCover && (
         <div
           className="now-playing-bg"
@@ -244,13 +264,48 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
       )}
 
       <div className="now-playing-top">
-        <button className="icon-ghost-btn" onClick={onClose} title="Свернуть (Esc)">
+        <button className="icon-ghost-btn np-top-btn" onClick={onClose} title="Свернуть (Esc)">
           <ChevronDown size={22} />
         </button>
-        <span className="now-playing-badge">Сейчас играет</span>
-        <button className="icon-ghost-btn" onClick={onOpenEq} title="Эквалайзер">
-          <Sliders size={19} />
-        </button>
+
+        {isMobileUI ? (
+          <div className="np-mobile-tabs" role="tablist">
+            <button
+              type="button"
+              className={`np-mobile-tab ${mobileViewMode === 'player' ? 'active' : ''}`}
+              onClick={() => setMobileViewMode('player')}
+            >
+              Плеер
+            </button>
+            <button
+              type="button"
+              className={`np-mobile-tab ${mobileViewMode === 'lyrics' ? 'active' : ''}`}
+              onClick={() => setMobileViewMode('lyrics')}
+            >
+              Текст
+            </button>
+          </div>
+        ) : (
+          <span className="now-playing-badge">Сейчас играет</span>
+        )}
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {isMobileUI && onOpenQueue && (
+            <button
+              className="icon-ghost-btn np-top-btn"
+              onClick={() => {
+                onClose();
+                onOpenQueue();
+              }}
+              title="Очередь"
+            >
+              <ListMusic size={19} />
+            </button>
+          )}
+          <button className="icon-ghost-btn np-top-btn" onClick={onOpenEq} title="Эквалайзер">
+            <Sliders size={19} />
+          </button>
+        </div>
       </div>
 
       <div className="now-playing-grid">
@@ -271,7 +326,7 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
           <canvas ref={canvasRef} width={320} height={42} className="np-visualizer" />
 
           <div className="now-playing-meta">
-            <div>
+            <div style={{ minWidth: 0, flex: 1 }}>
               <h2 className="now-playing-title">{track.title}</h2>
               <p className="now-playing-artist">
                 <ArtistLinks
@@ -287,7 +342,7 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
               title="Мне нравится (L)"
             >
               <Heart
-                size={20}
+                size={22}
                 fill={track.isFavorite ? 'var(--accent-warm)' : 'none'}
                 color={track.isFavorite ? 'var(--accent-warm)' : 'currentColor'}
               />
@@ -295,30 +350,42 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
           </div>
 
           <div className="now-playing-controls">
-            <button className="icon-ghost-btn" onClick={onPrev}>
-              <SkipBack size={22} />
+            {onToggleShuffle && (
+              <button
+                type="button"
+                className={`icon-ghost-btn np-secondary-ctl ${isShuffle ? 'is-active' : ''}`}
+                onClick={onToggleShuffle}
+                title="Перемешать"
+              >
+                <Shuffle size={19} />
+              </button>
+            )}
+            <button type="button" className="icon-ghost-btn np-skip-btn" onClick={onPrev}>
+              <SkipBack size={24} />
             </button>
-            <button className="wave-play-btn" onClick={onTogglePlay}>
+            <button type="button" className="wave-play-btn np-play-btn" onClick={onTogglePlay}>
               {isPlaying ? (
-                <Pause size={24} fill="currentColor" />
+                <Pause size={26} fill="currentColor" />
               ) : (
-                <Play size={24} fill="currentColor" style={{ marginLeft: 2 }} />
+                <Play size={26} fill="currentColor" style={{ marginLeft: 2 }} />
               )}
             </button>
-            <button className="icon-ghost-btn" onClick={onNext}>
-              <SkipForward size={22} />
+            <button type="button" className="icon-ghost-btn np-skip-btn" onClick={onNext}>
+              <SkipForward size={24} />
             </button>
+            {onToggleRepeat && (
+              <button
+                type="button"
+                className={`icon-ghost-btn np-secondary-ctl ${isRepeat ? 'is-active' : ''}`}
+                onClick={onToggleRepeat}
+                title="Повтор"
+              >
+                <Repeat size={19} />
+              </button>
+            )}
           </div>
 
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              width: '100%',
-              marginTop: 14,
-            }}
-          >
+          <div className="np-progress-wrap">
             <span className="tabular-time" style={{ fontSize: 12, minWidth: 34 }}>
               {formatDuration(Math.floor(previewSec ?? positionSec))}
             </span>
@@ -335,15 +402,7 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
             </span>
           </div>
 
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              width: '100%',
-              marginTop: 10,
-            }}
-          >
+          <div className="np-volume-wrap">
             <button
               type="button"
               className="icon-ghost-btn"
@@ -407,6 +466,30 @@ export const NowPlayingOverlay: React.FC<NowPlayingOverlayProps> = ({
           )}
         </div>
       </div>
+
+      {isMobileUI && mobileViewMode === 'lyrics' && (
+        <div className="np-lyrics-mini-bar">
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div className="track-name recent-card-title">{track.title}</div>
+            <div className="track-artist recent-card-title">{track.artist}</div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button type="button" className="icon-ghost-btn" onClick={onPrev}>
+              <SkipBack size={20} />
+            </button>
+            <button type="button" className="player-play-circle" onClick={onTogglePlay}>
+              {isPlaying ? (
+                <Pause size={17} fill="#141416" />
+              ) : (
+                <Play size={17} fill="#141416" style={{ marginLeft: 2 }} />
+              )}
+            </button>
+            <button type="button" className="icon-ghost-btn" onClick={onNext}>
+              <SkipForward size={20} />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

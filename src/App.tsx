@@ -21,9 +21,12 @@ import {
   History,
   Flame,
   ArrowUp,
+  Plus,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 import { getCoverGradient, resolveCoverSrc } from './shared/models';
-import { Sidebar, NavTab } from './components/sidebar';
+import { Sidebar, MobileTopBar, MobileBottomNav, NavTab } from './components/sidebar';
 import { WaveModal } from './components/wave_modal';
 import { TrackList } from './components/track_list';
 import { PlayerBar } from './components/player_bar';
@@ -44,7 +47,9 @@ import {
   WaveSettings,
 } from './shared/models';
 import {
+  FrontendSyncPrefs,
   SearchArtistItem,
+  SyncImportSummary,
   tauriApi,
   YandexAuthStatus,
   YandexSearchResult,
@@ -53,12 +58,21 @@ import {
 interface TopSearchBarProps {
   externalValue: string;
   onSearchCommit: (value: string) => void;
+  isMobileUI?: boolean;
+  focusTrigger?: number;
 }
 
 const TopSearchBar: React.FC<TopSearchBarProps> = React.memo(
-  ({ externalValue, onSearchCommit }) => {
+  ({ externalValue, onSearchCommit, isMobileUI = false, focusTrigger = 0 }) => {
     const [localValue, setLocalValue] = useState(externalValue);
     const lastCommittedRef = useRef(externalValue);
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+      if (focusTrigger > 0) {
+        inputRef.current?.focus();
+      }
+    }, [focusTrigger]);
 
     useEffect(() => {
       if (externalValue !== lastCommittedRef.current) {
@@ -89,9 +103,14 @@ const TopSearchBar: React.FC<TopSearchBarProps> = React.memo(
         <div className="search-bar-wrap">
           <Search size={17} className="search-input-icon" />
           <input
+            ref={inputRef}
             type="text"
             className="search-input"
-            placeholder="Поиск треков в Яндекс Музыке и локальной медиатеке..."
+            placeholder={
+              isMobileUI
+                ? 'Треки, артисты, альбомы...'
+                : 'Поиск треков в Яндекс Музыке и локальной медиатеке...'
+            }
             value={localValue}
             onChange={(e) => setLocalValue(e.target.value)}
             onKeyDown={(e) => {
@@ -111,9 +130,9 @@ const TopSearchBar: React.FC<TopSearchBarProps> = React.memo(
             >
               <X size={16} />
             </button>
-          ) : (
+          ) : !isMobileUI ? (
             <kbd className="search-kbd">Ctrl K</kbd>
-          )}
+          ) : null}
         </div>
       </header>
     );
@@ -122,7 +141,26 @@ const TopSearchBar: React.FC<TopSearchBarProps> = React.memo(
 
 const INITIAL_RENDER_LIMIT = 40;
 
+function detectMobileUI(): boolean {
+  if (typeof window === 'undefined') return false;
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || window.innerWidth <= 900;
+}
+
 export const App: React.FC = () => {
+  const [isMobileUI, setIsMobileUI] = useState<boolean>(() => detectMobileUI());
+  const [searchFocusTrigger, setSearchFocusTrigger] = useState(0);
+  const [showNewPlaylistForm, setShowNewPlaylistForm] = useState(false);
+  const [newPlaylistName, setNewPlaylistName] = useState('');
+  const [editingLibId, setEditingLibId] = useState<string | null>(null);
+  const [editingLibName, setEditingLibName] = useState('');
+
+  useEffect(() => {
+    const onResize = () => setIsMobileUI(detectMobileUI());
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
   const [activeTab, setActiveTab] = useState<NavTab>('home');
   const [activePlaylistId, setActivePlaylistId] = useState<string | null>(null);
   const [tracks, setTracks] = useState<TrackItem[]>([]);
@@ -905,10 +943,7 @@ export const App: React.FC = () => {
         trackData ||
         allTracksRef.current.find((t) => t.id === trackId) ||
         (currentTrack?.id === trackId ? currentTrack : undefined);
-      const isCurrentlyFav =
-        allTracksRef.current.find((t) => t.id === trackId)?.isFavorite ??
-        target?.isFavorite ??
-        false;
+      const isCurrentlyFav = favoriteIdsRef.current.has(trackId);
       const nextFav = !isCurrentlyFav;
 
       const updateList = (list: TrackItem[]) =>
@@ -918,6 +953,9 @@ export const App: React.FC = () => {
       setWaveBuffer(updateList);
       setSearchResults(updateList);
       setQueue(updateList);
+      setRecentTracks(updateList);
+      setTopTracks(updateList);
+      setActivePlaylistTracks((prev) => (prev ? updateList(prev) : prev));
       setCurrentTrack((prev) =>
         prev && prev.id === trackId ? { ...prev, isFavorite: nextFav } : prev
       );
@@ -957,19 +995,17 @@ export const App: React.FC = () => {
         });
       }
 
-      if (target?.sourceType === 'local') {
-        try {
-          await tauriApi.toggleFavorite(trackId);
-        } catch {}
-      }
+      try {
+        await tauriApi.setTrackFavorite(trackId, nextFav);
+      } catch {}
     },
     [currentTrack]
   );
 
-  const handleCreatePlaylist = async () => {
+  const handleCreatePlaylist = async (customName?: string) => {
     const index = playlists.length + 1;
     const id = `pl-${Date.now()}`;
-    const name = `Плейлист #${index}`;
+    const name = (customName ?? '').trim() || `Плейлист #${index}`;
     try {
       const created = await tauriApi.createPlaylist(id, name);
       setPlaylists((prev) => [...prev, created]);
@@ -1279,20 +1315,25 @@ export const App: React.FC = () => {
     return set;
   }, [tracks, savedOnlineFavs]);
 
+  const favoriteIdsRef = useRef(favoriteIds);
+  favoriteIdsRef.current = favoriteIds;
+
   const allAvailableTracks = useMemo(() => {
     const map = new Map<string, TrackItem>();
+    const normalize = (t: TrackItem) => ({
+      ...t,
+      isFavorite: favoriteIds.has(t.id),
+    });
 
-    tracks.forEach((t) =>
-      map.set(t.id, favoriteIds.has(t.id) ? { ...t, isFavorite: true } : t)
-    );
+    tracks.forEach((t) => map.set(t.id, normalize(t)));
     waveBuffer.forEach((t) => {
       if (!map.has(t.id)) {
-        map.set(t.id, favoriteIds.has(t.id) ? { ...t, isFavorite: true } : t);
+        map.set(t.id, normalize(t));
       }
     });
     searchResults.forEach((t) => {
       if (!map.has(t.id)) {
-        map.set(t.id, favoriteIds.has(t.id) ? { ...t, isFavorite: true } : t);
+        map.set(t.id, normalize(t));
       }
     });
     savedOnlineFavs.forEach((t) => {
@@ -1302,12 +1343,12 @@ export const App: React.FC = () => {
     });
     recentTracks.forEach((t) => {
       if (!map.has(t.id)) {
-        map.set(t.id, favoriteIds.has(t.id) ? { ...t, isFavorite: true } : t);
+        map.set(t.id, normalize(t));
       }
     });
     topTracks.forEach((t) => {
       if (!map.has(t.id)) {
-        map.set(t.id, favoriteIds.has(t.id) ? { ...t, isFavorite: true } : t);
+        map.set(t.id, normalize(t));
       }
     });
 
@@ -1375,8 +1416,10 @@ export const App: React.FC = () => {
   const isSearching = searchQuery.trim().length > 0;
 
   const displayedTracks = useMemo(() => {
-    const applyFav = (t: TrackItem) =>
-      favoriteIds.has(t.id) ? { ...t, isFavorite: true } : t;
+    const applyFav = (t: TrackItem) => ({
+      ...t,
+      isFavorite: favoriteIds.has(t.id),
+    });
 
     if (isSearching) {
       const q = searchQuery.trim().toLowerCase();
@@ -1465,7 +1508,7 @@ export const App: React.FC = () => {
 
   const syncedCurrentTrack = useMemo(() => {
     if (!currentTrack) return null;
-    const isFav = currentTrack.isFavorite || favoriteIds.has(currentTrack.id);
+    const isFav = favoriteIds.has(currentTrack.id);
     return isFav === currentTrack.isFavorite
       ? currentTrack
       : { ...currentTrack, isFavorite: isFav };
@@ -1582,25 +1625,232 @@ export const App: React.FC = () => {
     }
   }, []);
 
+  const collectFrontendSyncPrefs = useCallback((): FrontendSyncPrefs => {
+    let likedArtists: string[] = [];
+    try {
+      const raw = localStorage.getItem('abyss-liked-artists');
+      if (raw) likedArtists = JSON.parse(raw);
+    } catch {}
+    return {
+      themeId: currentThemeId,
+      isNightMode,
+      waveSettings,
+      onlineFavs: savedOnlineFavs,
+      likedArtists,
+    };
+  }, [currentThemeId, isNightMode, waveSettings, savedOnlineFavs]);
+
+  const handleSyncImportComplete = useCallback(
+    async (summary: SyncImportSummary) => {
+      const prefs = summary.frontendPrefs;
+      if (prefs.themeId) {
+        setCurrentThemeId(prefs.themeId);
+        try {
+          localStorage.setItem('abyss-theme', prefs.themeId);
+        } catch {}
+      }
+      if (typeof prefs.isNightMode === 'boolean') {
+        setIsNightMode(prefs.isNightMode);
+        try {
+          localStorage.setItem('abyss-night-mode', String(prefs.isNightMode));
+        } catch {}
+      }
+      if (prefs.waveSettings) {
+        setWaveSettings(prefs.waveSettings);
+      }
+      if (prefs.onlineFavs && prefs.onlineFavs.length > 0) {
+        setSavedOnlineFavs((prev) => {
+          const seen = new Set(prev.map((t) => t.id));
+          const merged = [...prev];
+          for (const item of prefs.onlineFavs) {
+            if (!seen.has(item.id)) {
+              seen.add(item.id);
+              merged.push({ ...item, isFavorite: true });
+            }
+          }
+          try {
+            localStorage.setItem('abyss-online-favs', JSON.stringify(merged));
+          } catch {}
+          return merged;
+        });
+      }
+      if (prefs.likedArtists && prefs.likedArtists.length > 0) {
+        try {
+          const prevRaw = localStorage.getItem('abyss-liked-artists');
+          const prevList: string[] = prevRaw ? JSON.parse(prevRaw) : [];
+          const merged = Array.from(new Set([...prevList, ...prefs.likedArtists]));
+          localStorage.setItem('abyss-liked-artists', JSON.stringify(merged));
+        } catch {}
+      }
+
+      try {
+        const [savedTracks, savedPlaylists, ymStatus, recent, top, savedQueue] =
+          await Promise.all([
+            tauriApi.getTracks(),
+            tauriApi.getPlaylists(),
+            tauriApi.getYandexStatus(),
+            tauriApi.getRecentTracks(12).catch(() => [] as TrackItem[]),
+            tauriApi.getTopTracks(12).catch(() => [] as TrackItem[]),
+            tauriApi.loadQueueState().catch(() => null),
+          ]);
+        setTracks(savedTracks);
+        setPlaylists(savedPlaylists);
+        setYandexAuth(ymStatus);
+        setRecentTracks(recent);
+        setTopTracks(top);
+
+        if (savedQueue && !currentTrack) {
+          const restoredQueue =
+            savedQueue.queueTracks && savedQueue.queueTracks.length > 0
+              ? savedQueue.queueTracks
+              : [];
+          if (restoredQueue.length > 0) {
+            setQueue(restoredQueue);
+            const restoredCurrent = savedQueue.currentTrackId
+              ? restoredQueue.find((t) => t.id === savedQueue.currentTrackId) || null
+              : null;
+            if (restoredCurrent) {
+              hasLoadedAudioRef.current = false;
+              restoredSeekSecRef.current = savedQueue.positionSec || 0;
+              setCurrentTrack(restoredCurrent);
+              setPlaybackStatus((prev) => ({
+                ...prev,
+                isPlaying: false,
+                positionSec: savedQueue.positionSec || 0,
+              }));
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Ошибка обновления состояния после синхронизации:', err);
+      }
+    },
+    [currentTrack]
+  );
+
+  const cloudReadyRef = useRef(false);
+  const isApplyingCloudRef = useRef(false);
+  const cloudImportRef = useRef(handleSyncImportComplete);
+  cloudImportRef.current = handleSyncImportComplete;
+  const collectPrefsRef = useRef(collectFrontendSyncPrefs);
+  collectPrefsRef.current = collectFrontendSyncPrefs;
+
+  // Автоматическая загрузка из облака Supabase при старте и каждые 3 секунды
+  useEffect(() => {
+    if (!isAppReady || !yandexAuth.isAuthorized) {
+      cloudReadyRef.current = false;
+      return;
+    }
+    let cancelled = false;
+    let inFlight = false;
+    cloudReadyRef.current = false;
+
+    const pullOnce = async (isInitial: boolean) => {
+      if (inFlight || cancelled) return;
+      if (!isInitial && document.visibilityState === 'hidden') return;
+      inFlight = true;
+      try {
+        const summary = await tauriApi.cloudSyncPull();
+        if (cancelled) return;
+        if (summary) {
+          isApplyingCloudRef.current = true;
+          try {
+            await cloudImportRef.current(summary);
+          } finally {
+            window.setTimeout(() => {
+              isApplyingCloudRef.current = false;
+            }, 300);
+          }
+        } else if (isInitial || !cloudReadyRef.current) {
+          await tauriApi.cloudSyncPush(collectPrefsRef.current());
+        }
+        if (!cancelled) {
+          cloudReadyRef.current = true;
+        }
+      } catch {
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void pullOnce(true);
+    const interval = window.setInterval(() => {
+      void pullOnce(false);
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [isAppReady, yandexAuth.isAuthorized]);
+
+  // Фоновое автосохранение изменений в облако Supabase
+  useEffect(() => {
+    if (
+      !isAppReady ||
+      !yandexAuth.isAuthorized ||
+      !cloudReadyRef.current ||
+      isApplyingCloudRef.current
+    ) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      if (!isApplyingCloudRef.current) {
+        void tauriApi.cloudSyncPush(collectPrefsRef.current()).catch(() => {});
+      }
+    }, 1500);
+    return () => window.clearTimeout(timer);
+  }, [
+    isAppReady,
+    yandexAuth.isAuthorized,
+    playlists,
+    savedOnlineFavs,
+    recentTracks,
+    currentThemeId,
+    isNightMode,
+    waveSettings,
+    currentTrack?.id,
+  ]);
+
+  useEffect(() => {
+    const flushCloud = () => {
+      if (!yandexAuth.isAuthorized || !cloudReadyRef.current || isApplyingCloudRef.current) {
+        return;
+      }
+      void tauriApi.cloudSyncPush(collectPrefsRef.current()).catch(() => {});
+    };
+    const onVis = () => {
+      if (document.visibilityState === 'hidden') flushCloud();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('pagehide', flushCloud);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('pagehide', flushCloud);
+    };
+  }, [yandexAuth.isAuthorized]);
+
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${isMobileUI ? 'is-mobile-ui' : ''}`}>
       <SplashScreen isReady={isAppReady} statusText={splashStatus} />
-      <div
-        ref={bloomRef}
-        className="cursor-bloom"
-        aria-hidden="true"
-        style={{
-          position: 'fixed',
-          left: 0,
-          top: 0,
-          width: 140,
-          height: 140,
-          marginLeft: -70,
-          marginTop: -70,
-          zIndex: 40,
-          pointerEvents: 'none',
-        }}
-      />
+      {!isMobileUI && (
+        <div
+          ref={bloomRef}
+          className="cursor-bloom"
+          aria-hidden="true"
+          style={{
+            position: 'fixed',
+            left: 0,
+            top: 0,
+            width: 140,
+            height: 140,
+            marginLeft: -70,
+            marginTop: -70,
+            zIndex: 40,
+            pointerEvents: 'none',
+          }}
+        />
+      )}
 
       {syncedCurrentTrack?.coverUrl && (
         <div
@@ -1610,33 +1860,49 @@ export const App: React.FC = () => {
         />
       )}
 
-      <Sidebar
-        activeTab={activeTab}
-        activePlaylistId={activePlaylistId}
-        playlists={playlists}
-        yandexAuth={yandexAuth}
-        onSelectTab={(tab) => {
-          setSearchQuery('');
-          setSelectedEntity(null);
-          setActiveTab(tab);
-          if (tab !== 'playlist') {
+      {isMobileUI ? (
+        <MobileTopBar
+          yandexAuth={yandexAuth}
+          onGoHome={() => {
+            setSearchQuery('');
+            setSelectedEntity(null);
+            setActiveTab('home');
             setActivePlaylistId(null);
-          }
-        }}
-        onSelectPlaylist={(playlistId) => {
-          setSearchQuery('');
-          setSelectedEntity(null);
-          setActivePlaylistId(playlistId);
-          setActiveTab('playlist');
-        }}
-        onCreatePlaylist={handleCreatePlaylist}
-        onRenamePlaylist={handleRenamePlaylist}
-        onDeletePlaylist={handleDeletePlaylist}
-        onScanFolder={handlePickAndScanFolder}
-        onOpenThemes={() => setIsThemeModalOpen(true)}
-        onYandexLogin={handleYandexLogin}
-        onYandexLogout={handleYandexLogout}
-      />
+          }}
+          onOpenThemes={() => setIsThemeModalOpen(true)}
+          onOpenEq={() => setIsEqOpen(true)}
+          onYandexLogin={handleYandexLogin}
+          onYandexLogout={handleYandexLogout}
+        />
+      ) : (
+        <Sidebar
+          activeTab={activeTab}
+          activePlaylistId={activePlaylistId}
+          playlists={playlists}
+          yandexAuth={yandexAuth}
+          onSelectTab={(tab) => {
+            setSearchQuery('');
+            setSelectedEntity(null);
+            setActiveTab(tab);
+            if (tab !== 'playlist') {
+              setActivePlaylistId(null);
+            }
+          }}
+          onSelectPlaylist={(playlistId) => {
+            setSearchQuery('');
+            setSelectedEntity(null);
+            setActivePlaylistId(playlistId);
+            setActiveTab('playlist');
+          }}
+          onCreatePlaylist={() => void handleCreatePlaylist()}
+          onRenamePlaylist={handleRenamePlaylist}
+          onDeletePlaylist={handleDeletePlaylist}
+          onScanFolder={handlePickAndScanFolder}
+          onOpenThemes={() => setIsThemeModalOpen(true)}
+          onYandexLogin={handleYandexLogin}
+          onYandexLogout={handleYandexLogout}
+        />
+      )}
 
       <div className="main-workspace-wrap">
         <main
@@ -1647,13 +1913,17 @@ export const App: React.FC = () => {
             setShowScrollTop(top > 120);
           }}
         >
-          <TopSearchBar
-            externalValue={searchQuery}
-            onSearchCommit={(val) => {
-              if (val.trim()) setSelectedEntity(null);
-              setSearchQuery(val);
-            }}
-          />
+          {(!isMobileUI || activeTab === 'search' || activeTab === 'home' || isSearching) && (
+            <TopSearchBar
+              externalValue={searchQuery}
+              isMobileUI={isMobileUI}
+              focusTrigger={searchFocusTrigger}
+              onSearchCommit={(val) => {
+                if (val.trim()) setSelectedEntity(null);
+                setSearchQuery(val);
+              }}
+            />
+          )}
 
           <div key={viewKey} className="view-transition">
           {selectedEntity?.type === 'artist' ? (
@@ -2038,7 +2308,11 @@ export const App: React.FC = () => {
                 </>
               )}
 
-              {!isLoadingStream && tracks.length === 0 && !isWaveActive && (
+              {!isLoadingStream &&
+                tracks.length === 0 &&
+                !isWaveActive &&
+                !yandexAuth.isAuthorized &&
+                recentTracks.length === 0 && (
                 <div style={{ marginTop: 28 }} className="empty-box">
                   <FolderPlus size={36} />
                   <div className="track-name" style={{ fontSize: 16 }}>
@@ -2116,9 +2390,10 @@ export const App: React.FC = () => {
                     </h2>
                   </div>
                   <TrackList
-                    tracks={topTracks.slice(0, 10).map((t) =>
-                      favoriteIds.has(t.id) ? { ...t, isFavorite: true } : t
-                    )}
+                    tracks={topTracks.slice(0, 10).map((t) => ({
+                      ...t,
+                      isFavorite: favoriteIds.has(t.id),
+                    }))}
                     currentTrackId={syncedCurrentTrack?.id ?? null}
                     isPlaying={playbackStatus.isPlaying}
                     onSelectTrack={(track) => handleSelectTrack(track, topTracks, false)}
@@ -2278,8 +2553,249 @@ export const App: React.FC = () => {
                 </div>
               )}
             </div>
+          ) : activeTab === 'search' ? (
+            <div>
+              <div className="empty-box" style={{ marginTop: 14 }}>
+                <Search size={34} style={{ color: 'var(--accent-warm)' }} />
+                <div className="track-name" style={{ fontSize: 17 }}>
+                  Найди любимый трек или артиста
+                </div>
+                <p className="track-artist" style={{ maxWidth: 360 }}>
+                  Введи название трека, имя исполнителя или альбома в строку поиска выше
+                </p>
+              </div>
+              {recentTracks.length > 0 && (
+                <div style={{ marginTop: 24 }}>
+                  <div className="section-header-row">
+                    <h2 className="section-heading shimmer-text">Недавно слушали</h2>
+                  </div>
+                  <div className="recent-grid">
+                    {recentTracks.slice(0, 6).map((tr) => {
+                      const src = resolveCoverSrc(tr.coverUrl);
+                      return (
+                        <button
+                          key={`search-recent-${tr.id}`}
+                          type="button"
+                          className={`recent-card ${syncedCurrentTrack?.id === tr.id ? 'is-playing' : ''}`}
+                          onClick={() => handleSelectTrack(tr, recentTracks, false)}
+                        >
+                          {src ? (
+                            <img src={src} alt={tr.title} className="recent-thumb" loading="lazy" />
+                          ) : (
+                            <div
+                              className="recent-thumb"
+                              style={{ background: getCoverGradient(tr.id) }}
+                            >
+                              <Music size={17} />
+                            </div>
+                          )}
+                          <div className="recent-card-text">
+                            <span className="recent-card-title shimmer-text">{tr.title}</span>
+                            <span className="recent-card-artist">{tr.artist}</span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : activeTab === 'library' ? (
+            <div className="mobile-library-view">
+              <div className="mobile-library-header">
+                <h1 className="section-heading shimmer-text" style={{ fontSize: 24 }}>
+                  Коллекция
+                </h1>
+                <div className="mobile-library-actions">
+                  <button
+                    type="button"
+                    className="chip-btn"
+                    onClick={handlePickAndScanFolder}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                  >
+                    <FolderPlus size={15} />
+                    <span>Папка</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-primary-pill"
+                    style={{
+                      padding: '9px 16px',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 6,
+                    }}
+                    onClick={() => {
+                      setShowNewPlaylistForm((v) => !v);
+                      setNewPlaylistName('');
+                    }}
+                  >
+                    <Plus size={16} />
+                    <span>Плейлист</span>
+                  </button>
+                </div>
+              </div>
+
+              {showNewPlaylistForm && (
+                <form
+                  className="mobile-new-pl-form"
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    await handleCreatePlaylist(newPlaylistName);
+                    setNewPlaylistName('');
+                    setShowNewPlaylistForm(false);
+                  }}
+                >
+                  <input
+                    type="text"
+                    className="mobile-new-pl-input"
+                    placeholder="Название нового плейлиста..."
+                    value={newPlaylistName}
+                    autoFocus
+                    onChange={(e) => setNewPlaylistName(e.target.value)}
+                  />
+                  <button type="submit" className="btn-primary-pill" style={{ padding: '9px 16px' }}>
+                    Создать
+                  </button>
+                </form>
+              )}
+
+              <div className="mobile-playlist-grid">
+                <button
+                  type="button"
+                  className="mobile-playlist-card is-favorites-card"
+                  onClick={() => {
+                    setSelectedEntity(null);
+                    setActivePlaylistId(null);
+                    setActiveTab('favorites');
+                  }}
+                >
+                  <div className="mobile-playlist-cover is-fav">
+                    <Heart size={24} fill="#ffffff" color="#ffffff" />
+                  </div>
+                  <div className="mobile-playlist-info">
+                    <div className="track-name">Мне нравится</div>
+                    <div className="track-artist">Избранные треки • {favoriteIds.size}</div>
+                  </div>
+                </button>
+
+                {playlists.map((pl) => {
+                  const isEditing = editingLibId === pl.id;
+                  return (
+                    <div
+                      key={pl.id}
+                      className="mobile-playlist-card"
+                      onClick={() => {
+                        if (isEditing) return;
+                        setSelectedEntity(null);
+                        setActivePlaylistId(pl.id);
+                        setActiveTab('playlist');
+                      }}
+                      role="button"
+                      tabIndex={0}
+                    >
+                      <div
+                        className="mobile-playlist-cover"
+                        style={{ background: getCoverGradient(pl.id) }}
+                      >
+                        <Music size={22} />
+                      </div>
+                      <div className="mobile-playlist-info">
+                        {isEditing ? (
+                          <input
+                            className="playlist-rename-input"
+                            style={{ width: '100%', fontSize: 14, padding: '6px 8px' }}
+                            value={editingLibName}
+                            autoFocus
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => setEditingLibName(e.target.value)}
+                            onBlur={() => {
+                              const t = editingLibName.trim();
+                              if (t) void handleRenamePlaylist(pl.id, t);
+                              setEditingLibId(null);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                const t = editingLibName.trim();
+                                if (t) void handleRenamePlaylist(pl.id, t);
+                                setEditingLibId(null);
+                              }
+                              if (e.key === 'Escape') setEditingLibId(null);
+                            }}
+                          />
+                        ) : (
+                          <>
+                            <div className="track-name recent-card-title">{pl.name}</div>
+                            <div className="track-artist">Треков: {pl.trackIds.length}</div>
+                          </>
+                        )}
+                      </div>
+                      {!isEditing && (
+                        <div
+                          className="mobile-playlist-card-actions"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <button
+                            type="button"
+                            className="icon-ghost-btn"
+                            title="Переименовать"
+                            onClick={() => {
+                              setEditingLibId(pl.id);
+                              setEditingLibName(pl.name);
+                            }}
+                          >
+                            <Pencil size={15} />
+                          </button>
+                          <button
+                            type="button"
+                            className="icon-ghost-btn"
+                            title="Удалить"
+                            onClick={() => handleDeletePlaylist(pl.id)}
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {tracks.length > 0 && (
+                <div style={{ marginTop: 24 }}>
+                  <div className="section-header-row" style={{ marginTop: 0 }}>
+                    <h2 className="section-heading shimmer-text">
+                      Локальные треки ({tracks.length})
+                    </h2>
+                  </div>
+                  <TrackList
+                    tracks={tracks.slice(0, 40)}
+                    currentTrackId={syncedCurrentTrack?.id ?? null}
+                    isPlaying={playbackStatus.isPlaying}
+                    onSelectTrack={(track) => handleSelectTrack(track, tracks, false)}
+                    onToggleFavorite={handleToggleFavorite}
+                    onAddToPlaylist={setPickerTrack}
+                    onSelectArtist={openArtistPage}
+                    onSelectAlbum={openAlbumPage}
+                  />
+                </div>
+              )}
+            </div>
           ) : activeTab === 'playlist' && activePlaylist ? (
             <div>
+              {isMobileUI && (
+                <button
+                  type="button"
+                  className="wave-settings-btn"
+                  style={{ marginBottom: 14, height: 38, padding: '0 14px', fontSize: 13 }}
+                  onClick={() => {
+                    setActivePlaylistId(null);
+                    setActiveTab('library');
+                  }}
+                >
+                  ← Коллекция
+                </button>
+              )}
               <div className="collection-banner">
                 <div className="collection-big-cover">
                   <Music size={42} />
@@ -2352,88 +2868,98 @@ export const App: React.FC = () => {
       </div>
 
       {isQueueOpen && (
-        <aside className="queue-drawer">
-          <div className="queue-header">
-            <span className="section-heading shimmer-text" style={{ fontSize: 17 }}>
-              {isWaveActive ? 'Поток волны' : 'Очередь'}
-            </span>
-            <button
-              className="icon-ghost-btn"
+        <>
+          {isMobileUI && (
+            <div
+              className="queue-mobile-backdrop"
               onClick={() => setIsQueueOpen(false)}
-              title="Закрыть очередь"
-            >
-              <X size={18} />
-            </button>
-          </div>
-
-          {syncedCurrentTrack && (
-            <div className="queue-now-card">
-              {resolveCoverSrc(syncedCurrentTrack.coverUrl) ? (
-                <img
-                  src={resolveCoverSrc(syncedCurrentTrack.coverUrl)!}
-                  alt={syncedCurrentTrack.title}
-                  className="queue-big-art"
-                />
-              ) : (
-                <div className="queue-big-art">
-                  <Music size={36} />
-                </div>
-              )}
-              <div className="track-name shimmer-text" style={{ fontSize: 16 }}>
-                {syncedCurrentTrack.title}
-              </div>
-              <div className="track-artist">
-                <ArtistLinks
-                  artist={syncedCurrentTrack.artist}
-                  onSelectArtist={openArtistPage}
-                />
-              </div>
-            </div>
+            />
           )}
+          <aside className="queue-drawer">
+            <div className="queue-header">
+              <span className="section-heading shimmer-text" style={{ fontSize: 17 }}>
+                {isWaveActive ? 'Поток волны' : 'Очередь'}
+              </span>
+              <button
+                className="icon-ghost-btn"
+                onClick={() => setIsQueueOpen(false)}
+                title="Закрыть очередь"
+              >
+                <X size={18} />
+              </button>
+            </div>
 
-          <div className="modal-group-label" style={{ marginBottom: 10 }}>
-            {isWaveActive ? 'Следующий трек' : `Далее в очереди (${activeQueue.length})`}
-          </div>
-          <div className="queue-scroll">
-            {(isWaveActive ? (nextWaveTrack ? [nextWaveTrack] : []) : activeQueue.slice(0, 50)).map(
-              (track) => {
-                const isCurrent = syncedCurrentTrack?.id === track.id;
-                return (
-                  <button
-                    key={track.id}
-                    type="button"
-                    className={`playlist-row ${isCurrent ? 'active' : ''}`}
-                    onClick={() =>
-                      isWaveActive
-                        ? handleNextTrack(false)
-                        : handleSelectTrack(track, activeQueue, false)
-                    }
-                  >
-                    {resolveCoverSrc(track.coverUrl) ? (
-                      <img
-                        src={resolveCoverSrc(track.coverUrl)!}
-                        alt={track.title}
-                        className="track-mini-cover"
-                        loading="lazy"
-                        decoding="async"
-                      />
-                    ) : (
-                      <div className="track-mini-cover">
-                        <Music size={14} />
-                      </div>
-                    )}
-                    <div className="recent-card-text">
-                      <span className="track-name shimmer-text" style={{ fontSize: 13 }}>
-                        {track.title}
-                      </span>
-                      <span className="track-artist">{track.artist}</span>
-                    </div>
-                  </button>
-                );
-              }
+            {syncedCurrentTrack && (
+              <div className="queue-now-card">
+                {resolveCoverSrc(syncedCurrentTrack.coverUrl) ? (
+                  <img
+                    src={resolveCoverSrc(syncedCurrentTrack.coverUrl)!}
+                    alt={syncedCurrentTrack.title}
+                    className="queue-big-art"
+                  />
+                ) : (
+                  <div className="queue-big-art">
+                    <Music size={36} />
+                  </div>
+                )}
+                <div style={{ minWidth: 0 }}>
+                  <div className="track-name shimmer-text recent-card-title" style={{ fontSize: 16 }}>
+                    {syncedCurrentTrack.title}
+                  </div>
+                  <div className="track-artist recent-card-title">
+                    <ArtistLinks
+                      artist={syncedCurrentTrack.artist}
+                      onSelectArtist={openArtistPage}
+                    />
+                  </div>
+                </div>
+              </div>
             )}
-          </div>
-        </aside>
+
+            <div className="modal-group-label" style={{ marginBottom: 10 }}>
+              {isWaveActive ? 'Следующий трек' : `Далее в очереди (${activeQueue.length})`}
+            </div>
+            <div className="queue-scroll">
+              {(isWaveActive ? (nextWaveTrack ? [nextWaveTrack] : []) : activeQueue.slice(0, 50)).map(
+                (track) => {
+                  const isCurrent = syncedCurrentTrack?.id === track.id;
+                  return (
+                    <button
+                      key={track.id}
+                      type="button"
+                      className={`playlist-row ${isCurrent ? 'active' : ''}`}
+                      onClick={() =>
+                        isWaveActive
+                          ? handleNextTrack(false)
+                          : handleSelectTrack(track, activeQueue, false)
+                      }
+                    >
+                      {resolveCoverSrc(track.coverUrl) ? (
+                        <img
+                          src={resolveCoverSrc(track.coverUrl)!}
+                          alt={track.title}
+                          className="track-mini-cover"
+                          loading="lazy"
+                          decoding="async"
+                        />
+                      ) : (
+                        <div className="track-mini-cover">
+                          <Music size={14} />
+                        </div>
+                      )}
+                      <div className="recent-card-text">
+                        <span className="track-name shimmer-text" style={{ fontSize: 13 }}>
+                          {track.title}
+                        </span>
+                        <span className="track-artist">{track.artist}</span>
+                      </div>
+                    </button>
+                  );
+                }
+              )}
+            </div>
+          </aside>
+        </>
       )}
 
       <PlayerBar
@@ -2445,6 +2971,7 @@ export const App: React.FC = () => {
         isEqOpen={isEqOpen}
         isLyricsOpen={isNowPlayingOpen}
         isWidgetOpen={isWidgetOpen}
+        isMobileUI={isMobileUI}
         isMuted={playbackStatus.isMuted}
         positionSec={playbackStatus.positionSec}
         volume={playbackStatus.volume}
@@ -2453,7 +2980,7 @@ export const App: React.FC = () => {
         onToggleRepeat={() => setIsRepeat((r) => !r)}
         onToggleQueue={() => setIsQueueOpen((q) => !q)}
         onToggleEq={() => setIsEqOpen((eq) => !eq)}
-        onToggleWidget={handleToggleWidget}
+        onToggleWidget={isMobileUI ? undefined : handleToggleWidget}
         onToggleMute={handleToggleMute}
         onPrev={handlePrevTrack}
         onNext={() => handleNextTrack(false)}
@@ -2463,6 +2990,27 @@ export const App: React.FC = () => {
         onSelectArtist={openArtistPage}
         onOpenNowPlaying={() => syncedCurrentTrack && setIsNowPlayingOpen(true)}
       />
+
+      {isMobileUI && (
+        <MobileBottomNav
+          activeTab={activeTab}
+          isSearching={isSearching}
+          onSelectTab={(tab) => {
+            setSelectedEntity(null);
+            if (tab === 'search') {
+              setActivePlaylistId(null);
+              setActiveTab('search');
+              setSearchFocusTrigger((n) => n + 1);
+            } else {
+              setSearchQuery('');
+              setActiveTab(tab);
+              if (tab !== 'playlist') {
+                setActivePlaylistId(null);
+              }
+            }
+          }}
+        />
+      )}
 
       {isWaveModalOpen && (
         <WaveModal
@@ -2503,12 +3051,18 @@ export const App: React.FC = () => {
         isOpen={isNowPlayingOpen}
         track={syncedCurrentTrack}
         isPlaying={playbackStatus.isPlaying}
+        isShuffle={isShuffle}
+        isRepeat={isRepeat}
+        isMobileUI={isMobileUI}
         positionSec={playbackStatus.positionSec}
         volume={playbackStatus.volume}
         isMuted={playbackStatus.isMuted}
         audioLevel={playbackStatus.audioLevel ?? 0}
         onClose={() => setIsNowPlayingOpen(false)}
         onTogglePlay={handleTogglePlay}
+        onToggleShuffle={() => setIsShuffle((s) => !s)}
+        onToggleRepeat={() => setIsRepeat((r) => !r)}
+        onOpenQueue={() => setIsQueueOpen(true)}
         onPrev={handlePrevTrack}
         onNext={() => handleNextTrack(false)}
         onSeek={handleSeek}

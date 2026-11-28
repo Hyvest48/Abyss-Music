@@ -1,11 +1,12 @@
 ﻿use std::fs;
+use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use crate::models::{PlaylistItem, TrackItem};
 
-pub fn init_database(app: &AppHandle) -> Result<Connection, String> {
-    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
+pub fn init_database_at(app_dir: &Path) -> Result<Connection, String> {
+    fs::create_dir_all(app_dir).map_err(|e| e.to_string())?;
     let db_path = app_dir.join("abyss_music.db");
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
 
@@ -62,6 +63,12 @@ pub fn init_database(app: &AppHandle) -> Result<Connection, String> {
     );
 
     Ok(conn)
+}
+
+#[allow(dead_code)]
+pub fn init_database(app: &AppHandle) -> Result<Connection, String> {
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    init_database_at(&app_dir)
 }
 
 pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>, String> {
@@ -219,6 +226,19 @@ pub fn toggle_favorite(conn: &Connection, track_id: &str) -> Result<bool, String
         .map_err(|e| e.to_string())?;
 
     Ok(is_fav != 0)
+}
+
+pub fn set_track_favorite(
+    conn: &Connection,
+    track_id: &str,
+    is_favorite: bool,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE tracks SET is_favorite = ?1 WHERE id = ?2",
+        params![if is_favorite { 1 } else { 0 }, track_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 pub fn get_playlists(conn: &Connection) -> Result<Vec<PlaylistItem>, String> {
@@ -524,4 +544,409 @@ pub fn get_artist_listening_time(conn: &Connection, artist_name: &str) -> Result
         .optional()
         .map_err(|e| e.to_string())?;
     Ok(secs.unwrap_or(0).max(0) as u64)
+}
+
+// ─── Кросс-платформенный экспорт и импорт базы данных ────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncTrackRow {
+    #[serde(flatten)]
+    pub track: TrackItem,
+    #[serde(default)]
+    pub play_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncPlayHistoryRow {
+    pub track_id: String,
+    pub played_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncArtistStatRow {
+    pub artist_name: String,
+    pub total_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncQueueRow {
+    pub track_ids: Vec<String>,
+    pub current_track_id: Option<String>,
+    pub position_sec: u64,
+    #[serde(default)]
+    pub queue_tracks: Vec<TrackItem>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrontendSyncPrefs {
+    #[serde(default)]
+    pub theme_id: Option<String>,
+    #[serde(default)]
+    pub is_night_mode: Option<bool>,
+    #[serde(default)]
+    pub wave_settings: Option<serde_json::Value>,
+    #[serde(default)]
+    pub online_favs: Vec<TrackItem>,
+    #[serde(default)]
+    pub liked_artists: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AbyssSyncSnapshot {
+    pub version: u32,
+    pub exported_at: i64,
+    pub source_device: String,
+    #[serde(default)]
+    pub settings: Vec<(String, String)>,
+    #[serde(default)]
+    pub tracks: Vec<SyncTrackRow>,
+    #[serde(default)]
+    pub playlists: Vec<PlaylistItem>,
+    #[serde(default)]
+    pub play_history: Vec<SyncPlayHistoryRow>,
+    #[serde(default)]
+    pub artist_stats: Vec<SyncArtistStatRow>,
+    #[serde(default)]
+    pub queue_state: Option<SyncQueueRow>,
+    #[serde(default)]
+    pub frontend_prefs: FrontendSyncPrefs,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncImportSummary {
+    pub source_device: String,
+    pub tracks_imported: usize,
+    pub playlists_imported: usize,
+    pub favorites_imported: usize,
+    pub history_imported: usize,
+    pub yandex_token_updated: bool,
+    pub frontend_prefs: FrontendSyncPrefs,
+}
+
+pub fn export_sync_snapshot(
+    conn: &Connection,
+    source_device: &str,
+    frontend_prefs: FrontendSyncPrefs,
+) -> Result<AbyssSyncSnapshot, String> {
+    let exported_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let mut settings = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT key, value FROM app_settings")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            let (k, v) = r.map_err(|e| e.to_string())?;
+            if k == "widget_pos_x" || k == "widget_pos_y" {
+                continue;
+            }
+            settings.push((k, v));
+        }
+    }
+
+    let mut tracks = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, artist, album, duration_seconds, source_type, audio_url, cover_url, is_favorite, play_count
+                 FROM tracks",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(SyncTrackRow {
+                    track: TrackItem {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        artist: row.get(2)?,
+                        album: row.get(3)?,
+                        duration_seconds: row.get::<_, i64>(4)? as u64,
+                        source_type: row.get(5)?,
+                        audio_url: row.get(6)?,
+                        cover_url: row.get(7)?,
+                        is_favorite: row.get::<_, i64>(8)? != 0,
+                    },
+                    play_count: row.get::<_, i64>(9)?.max(0) as u64,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            tracks.push(r.map_err(|e| e.to_string())?);
+        }
+    }
+
+    let playlists = get_playlists(conn)?;
+
+    let mut play_history = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT track_id, played_at FROM play_history ORDER BY played_at DESC LIMIT 500")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(SyncPlayHistoryRow {
+                    track_id: row.get(0)?,
+                    played_at: row.get(1)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            play_history.push(r.map_err(|e| e.to_string())?);
+        }
+    }
+
+    let mut artist_stats = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT artist_name, total_seconds FROM artist_stats")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(SyncArtistStatRow {
+                    artist_name: row.get(0)?,
+                    total_seconds: row.get::<_, i64>(1)?.max(0) as u64,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            artist_stats.push(r.map_err(|e| e.to_string())?);
+        }
+    }
+
+    let queue_state = load_queue_state(conn)?.map(|qs| SyncQueueRow {
+        track_ids: qs.track_ids,
+        current_track_id: qs.current_track_id,
+        position_sec: qs.position_sec,
+        queue_tracks: qs.queue_tracks,
+    });
+
+    Ok(AbyssSyncSnapshot {
+        version: 1,
+        exported_at,
+        source_device: source_device.to_string(),
+        settings,
+        tracks,
+        playlists,
+        play_history,
+        artist_stats,
+        queue_state,
+        frontend_prefs,
+    })
+}
+
+fn is_track_playable_here(track: &TrackItem) -> bool {
+    if track.source_type != "local" {
+        return true;
+    }
+    Path::new(&track.audio_url).exists()
+}
+
+pub fn import_sync_snapshot(
+    conn: &mut Connection,
+    snapshot: &AbyssSyncSnapshot,
+) -> Result<SyncImportSummary, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    let mut yandex_token_updated = false;
+    for (k, v) in &snapshot.settings {
+        if k == "widget_pos_x" || k == "widget_pos_y" {
+            continue;
+        }
+        if k == "yandex_token" && !v.trim().is_empty() {
+            yandex_token_updated = true;
+        }
+        tx.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![k, v],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    let mut imported_track_ids = std::collections::HashSet::new();
+    let mut tracks_imported = 0usize;
+    let mut favorites_imported = 0usize;
+
+    for row in &snapshot.tracks {
+        let t = &row.track;
+        if !is_track_playable_here(t) {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO tracks (id, title, artist, album, duration_seconds, source_type, audio_url, cover_url, is_favorite, play_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(audio_url) DO UPDATE SET
+               title = excluded.title,
+               artist = excluded.artist,
+               album = excluded.album,
+               duration_seconds = excluded.duration_seconds,
+               cover_url = COALESCE(excluded.cover_url, tracks.cover_url),
+               is_favorite = CASE WHEN excluded.is_favorite = 1 THEN 1 ELSE tracks.is_favorite END,
+               play_count = MAX(tracks.play_count, excluded.play_count)",
+            params![
+                t.id,
+                t.title,
+                t.artist,
+                t.album,
+                t.duration_seconds as i64,
+                t.source_type,
+                t.audio_url,
+                t.cover_url,
+                if t.is_favorite { 1 } else { 0 },
+                row.play_count as i64,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        imported_track_ids.insert(t.id.clone());
+        tracks_imported += 1;
+        if t.is_favorite {
+            favorites_imported += 1;
+        }
+    }
+
+    for fav in &snapshot.frontend_prefs.online_favs {
+        if !is_track_playable_here(fav) {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO tracks (id, title, artist, album, duration_seconds, source_type, audio_url, cover_url, is_favorite)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
+             ON CONFLICT(audio_url) DO UPDATE SET
+               title = excluded.title,
+               artist = excluded.artist,
+               album = excluded.album,
+               cover_url = COALESCE(excluded.cover_url, tracks.cover_url),
+               is_favorite = 1",
+            params![
+                fav.id,
+                fav.title,
+                fav.artist,
+                fav.album,
+                fav.duration_seconds as i64,
+                fav.source_type,
+                fav.audio_url,
+                fav.cover_url,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        imported_track_ids.insert(fav.id.clone());
+    }
+
+    let mut playlists_imported = 0usize;
+    for pl in &snapshot.playlists {
+        tx.execute(
+            "INSERT INTO playlists (id, name, cover_url) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET
+               name = excluded.name,
+               cover_url = COALESCE(excluded.cover_url, playlists.cover_url)",
+            params![pl.id, pl.name, pl.cover_url],
+        )
+        .map_err(|e| e.to_string())?;
+        for tid in &pl.track_ids {
+            if imported_track_ids.contains(tid) {
+                tx.execute(
+                    "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id) VALUES (?1, ?2)",
+                    params![pl.id, tid],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        playlists_imported += 1;
+    }
+
+    let mut history_imported = 0usize;
+    for h in &snapshot.play_history {
+        if !imported_track_ids.contains(&h.track_id) {
+            continue;
+        }
+        let exists: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM play_history WHERE track_id = ?1 AND played_at = ?2 LIMIT 1",
+                params![h.track_id, h.played_at],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if exists.is_none() {
+            tx.execute(
+                "INSERT INTO play_history (track_id, played_at) VALUES (?1, ?2)",
+                params![h.track_id, h.played_at],
+            )
+            .map_err(|e| e.to_string())?;
+            history_imported += 1;
+        }
+    }
+    tx.execute(
+        "DELETE FROM play_history WHERE id NOT IN (SELECT id FROM play_history ORDER BY played_at DESC LIMIT 500)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+
+    for st in &snapshot.artist_stats {
+        tx.execute(
+            "INSERT INTO artist_stats (artist_name, total_seconds) VALUES (?1, ?2)
+             ON CONFLICT(artist_name) DO UPDATE SET total_seconds = MAX(artist_stats.total_seconds, excluded.total_seconds)",
+            params![st.artist_name, st.total_seconds as i64],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    if let Some(ref qs) = snapshot.queue_state {
+        let filtered_tracks: Vec<TrackItem> = qs
+            .queue_tracks
+            .iter()
+            .filter(|t| is_track_playable_here(t))
+            .cloned()
+            .take(200)
+            .collect();
+        if !filtered_tracks.is_empty() {
+            let valid_ids: Vec<String> = filtered_tracks.iter().map(|t| t.id.clone()).collect();
+            let valid_cur = qs
+                .current_track_id
+                .as_ref()
+                .filter(|id| valid_ids.iter().any(|vid| vid == *id))
+                .cloned();
+            let ids_json = serde_json::to_string(&valid_ids).map_err(|e| e.to_string())?;
+            let queue_json = serde_json::to_string(&filtered_tracks).map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT INTO queue_state (id, track_ids, current_track_id, position_sec, queue_json)
+                 VALUES (1, ?1, ?2, ?3, ?4)
+                 ON CONFLICT(id) DO UPDATE SET
+                   track_ids = excluded.track_ids,
+                   current_track_id = excluded.current_track_id,
+                   position_sec = excluded.position_sec,
+                   queue_json = excluded.queue_json",
+                params![ids_json, valid_cur, qs.position_sec as i64, queue_json],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    tx.commit().map_err(|e| e.to_string())?;
+
+    let mut cleaned_prefs = snapshot.frontend_prefs.clone();
+    cleaned_prefs.online_favs.retain(is_track_playable_here);
+
+    Ok(SyncImportSummary {
+        source_device: snapshot.source_device.clone(),
+        tracks_imported,
+        playlists_imported,
+        favorites_imported,
+        history_imported,
+        yandex_token_updated,
+        frontend_prefs: cleaned_prefs,
+    })
 }

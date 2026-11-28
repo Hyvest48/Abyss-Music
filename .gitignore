@@ -5,6 +5,16 @@ dist-ssr/
 src-tauri/target/
 src-tauri/gen/schemas/
 
+# Android артефакты сборки
+src-tauri/gen/android/.gradle/
+src-tauri/gen/android/.kotlin/
+src-tauri/gen/android/**/.kotlin/
+src-tauri/gen/android/**/build/
+src-tauri/gen/android/app/src/main/jniLibs/**/*.so
+src-tauri/gen/android/local.properties
+*.apk
+*.aab
+
 # Базы данных, кэш и логи
 *.db
 *.db-wal
@@ -26,8 +36,9 @@ desktop.ini
 !.vscode/extensions.json
 .idea/
 
-# Установщики и промежуточные бинарники (кроме актуального .exe в корне)
+# Установщики и актуальные бинарники в корне
 *.msi
 *.nsis.zip
 *.exe
 !/AbyssMusic.exe
+!/AbyssMusic.apk

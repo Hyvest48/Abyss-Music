@@ -125,6 +125,7 @@ interface PlayerBarProps {
   isEqOpen: boolean;
   isLyricsOpen: boolean;
   isWidgetOpen?: boolean;
+  isMobileUI?: boolean;
   isMuted: boolean;
   positionSec: number;
   volume: number;
@@ -153,6 +154,7 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
   isEqOpen,
   isLyricsOpen,
   isWidgetOpen = false,
+  isMobileUI = false,
   isMuted,
   positionSec,
   volume,
@@ -176,6 +178,111 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
   const duration = currentTrack?.durationSeconds ?? 0;
   const displayedTime = previewSec ?? positionSec;
   const effectiveVolume = isMuted ? 0 : volume;
+  const progressPct =
+    duration > 0 ? Math.min(100, Math.max(0, (displayedTime / duration) * 100)) : 0;
+
+  if (isMobileUI) {
+    const coverSrc = resolveCoverSrc(currentTrack?.coverUrl);
+    return (
+      <footer className="player-dock mobile-mini-player">
+        <div className="mobile-mini-progress-track">
+          <div className="mobile-mini-progress-fill" style={{ width: `${progressPct}%` }} />
+        </div>
+
+        <div
+          className="mobile-mini-track"
+          onClick={() => currentTrack && onOpenNowPlaying?.()}
+          role="button"
+          tabIndex={0}
+        >
+          {coverSrc ? (
+            <img
+              src={coverSrc}
+              alt={currentTrack?.title || 'Обложка'}
+              className="track-mini-cover"
+            />
+          ) : (
+            <div
+              className="track-mini-cover"
+              style={{
+                background: currentTrack
+                  ? getCoverGradient(currentTrack.id)
+                  : 'rgba(255,255,255,0.12)',
+              }}
+            >
+              <Music size={17} />
+            </div>
+          )}
+
+          {currentTrack ? (
+            <div className="mobile-mini-meta">
+              <div className="track-name recent-card-title">{currentTrack.title}</div>
+              <div className="track-artist recent-card-title">{currentTrack.artist}</div>
+            </div>
+          ) : (
+            <div className="track-artist">Выбери трек или волну</div>
+          )}
+        </div>
+
+        <div className="mobile-mini-controls">
+          {currentTrack && (
+            <button
+              type="button"
+              className="icon-ghost-btn mobile-mini-btn"
+              onClick={() => onToggleFavorite(currentTrack.id)}
+              title={currentTrack.isFavorite ? 'Убрать из избранного' : 'В избранное'}
+            >
+              <Heart
+                size={18}
+                fill={currentTrack.isFavorite ? 'var(--accent-warm)' : 'none'}
+                color={currentTrack.isFavorite ? 'var(--accent-warm)' : 'currentColor'}
+              />
+            </button>
+          )}
+
+          <button
+            type="button"
+            className="icon-ghost-btn mobile-mini-btn mobile-tablet-only"
+            onClick={onPrev}
+            title="Назад"
+          >
+            <SkipBack size={19} />
+          </button>
+
+          <button
+            type="button"
+            className="player-play-circle mobile-mini-play"
+            onClick={onTogglePlay}
+            title={isPlaying ? 'Пауза' : 'Играть'}
+          >
+            {isPlaying ? (
+              <Pause size={18} fill="#141416" />
+            ) : (
+              <Play size={18} fill="#141416" style={{ marginLeft: 2 }} />
+            )}
+          </button>
+
+          <button
+            type="button"
+            className="icon-ghost-btn mobile-mini-btn"
+            onClick={onNext}
+            title="Вперёд"
+          >
+            <SkipForward size={19} />
+          </button>
+
+          <button
+            type="button"
+            className={`icon-ghost-btn mobile-mini-btn ${isQueueOpen ? 'is-active' : ''}`}
+            onClick={onToggleQueue}
+            title="Очередь"
+          >
+            <ListMusic size={18} />
+          </button>
+        </div>
+      </footer>
+    );
+  }
 
   return (
     <footer className="player-dock">

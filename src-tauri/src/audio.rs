@@ -14,7 +14,7 @@ use crate::models::PlaybackStatus;
 use crate::providers;
 
 static CURRENT_AUDIO_LEVEL: AtomicU32 = AtomicU32::new(0);
-const MAX_CACHE_BYTES: u64 = 500 * 1024 * 1024; // 500 МБ офлайн-кэш
+const MAX_CACHE_BYTES: u64 = 100 * 1024 * 1024; // 100 МБ офлайн-кэш (~15–20 треков)
 
 trait ReadSeek: Read + Seek + Send + Sync {}
 impl<T: Read + Seek + Send + Sync> ReadSeek for T {}
@@ -326,6 +326,7 @@ pub struct AudioPlayer {
 impl AudioPlayer {
     pub fn new(cache_dir: PathBuf) -> Result<Self, String> {
         let _ = fs::create_dir_all(&cache_dir);
+        prune_cache_dir(&cache_dir);
         let (cmd_tx, cmd_rx) = mpsc::channel::<AudioCommand>();
         let eq_gains = Arc::new(Mutex::new([0.0_f32; 5]));
         let crossfade_ms = Arc::new(AtomicU32::new(500));
@@ -336,11 +337,8 @@ impl AudioPlayer {
         let cmd_tx_fade = cmd_tx.clone();
 
         thread::spawn(move || {
-            let output_pair = OutputStream::try_default().ok();
-            let (_stream_guard, stream_handle) = match output_pair {
-                Some((s, h)) => (Some(s), Some(h)),
-                None => (None, None),
-            };
+            let mut _stream_guard: Option<OutputStream> = None;
+            let mut stream_handle = None;
 
             let mut sink: Option<Sink> = None;
             let mut volume: f32 = 0.75;
@@ -399,6 +397,16 @@ impl AudioPlayer {
                         }
 
                         CURRENT_AUDIO_LEVEL.store(0.0_f32.to_bits(), Ordering::Relaxed);
+
+                        // Ленивая инициализация аудиовыхода при первом воспроизведении (безопасно для Android)
+                        if stream_handle.is_none() {
+                            if let Ok(Ok((s, h))) = std::panic::catch_unwind(
+                                std::panic::AssertUnwindSafe(OutputStream::try_default),
+                            ) {
+                                _stream_guard = Some(s);
+                                stream_handle = Some(h);
+                            }
+                        }
 
                         let res = match stream_handle.as_ref() {
                             Some(handle) => Sink::try_new(handle)

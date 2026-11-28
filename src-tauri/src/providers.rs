@@ -303,6 +303,49 @@ pub fn get_yandex_account_name(token: &str) -> Result<String, String> {
     Ok(name.to_string())
 }
 
+static YANDEX_UID_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(String, String)>>> =
+    std::sync::OnceLock::new();
+
+pub fn get_yandex_account_uid(token: &str) -> Result<String, String> {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return Err("Пустой токен Яндекс Музыки".to_string());
+    }
+    let cache = YANDEX_UID_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some((cached_tok, cached_uid)) = guard.as_ref() {
+            if cached_tok == trimmed {
+                return Ok(cached_uid.clone());
+            }
+        }
+    }
+
+    let client = ym_client(trimmed)?;
+    let url = format!("{}/account/status", YM_API);
+    let resp = send_json(client.get(&url))?;
+
+    let uid_val = if let Some(uid) = resp.pointer("/result/account/uid").and_then(|v| v.as_u64()) {
+        Some(uid.to_string())
+    } else if let Some(uid_str) = resp.pointer("/result/account/uid").and_then(|v| v.as_str()) {
+        let s = uid_str.trim();
+        if !s.is_empty() { Some(s.to_string()) } else { None }
+    } else if let Some(login) = resp.pointer("/result/account/login").and_then(|v| v.as_str()) {
+        let s = login.trim();
+        if !s.is_empty() { Some(s.to_string()) } else { None }
+    } else {
+        None
+    };
+
+    if let Some(uid) = uid_val {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = Some((trimmed.to_string(), uid.clone()));
+        }
+        return Ok(uid);
+    }
+
+    Err("Не удалось определить UID аккаунта Яндекс".to_string())
+}
+
 pub fn search_yandex(token: &str, query: &str) -> Result<Vec<TrackItem>, String> {
     if query.trim().is_empty() {
         return Ok(Vec::new());
@@ -1245,12 +1288,73 @@ pub fn fetch_lyrics(
         });
     }
 
+    let clean_title = title.trim();
+    let title_lower = clean_title.to_lowercase();
+    let artist_lower = primary_artist.to_lowercase();
+
+    let extract_lrclib_lyrics = |val: &Value| -> Option<TrackLyrics> {
+        let synced = val
+            .get("syncedLyrics")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let plain = val
+            .get("plainLyrics")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        if synced.is_some() || plain.is_some() {
+            return Some(TrackLyrics {
+                synced_lyrics: synced,
+                plain_lyrics: plain,
+                instrumental: false,
+            });
+        }
+        None
+    };
+
+    let is_lrclib_match = |val: &Value, strict: bool| -> bool {
+        let dur_ok = if duration_seconds > 0 {
+            val.get("duration")
+                .and_then(|v| v.as_f64())
+                .map(|d| (d - duration_seconds as f64).abs() <= if strict { 12.0 } else { 20.0 })
+                .unwrap_or(true)
+        } else {
+            true
+        };
+        if !dur_ok {
+            return false;
+        }
+        let tr = val
+            .get("trackName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let ar = val
+            .get("artistName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if strict {
+            !tr.is_empty()
+                && !ar.is_empty()
+                && (tr.contains(&title_lower) || title_lower.contains(&tr))
+                && (ar.contains(&artist_lower) || artist_lower.contains(&ar))
+        } else {
+            tr.contains(&title_lower)
+                || title_lower.contains(&tr)
+                || ar.contains(&artist_lower)
+                || artist_lower.contains(&ar)
+        }
+    };
+
     let get_url = format!("{}/get", LRCLIB_API);
     let mut req = client
         .get(&get_url)
         .timeout(Duration::from_secs(2))
         .query(&[
-            ("track_name", title.trim()),
+            ("track_name", clean_title),
             ("artist_name", primary_artist),
         ]);
 
@@ -1264,34 +1368,64 @@ pub fn fetch_lyrics(
     if let Ok(resp) = req.send() {
         if resp.status().is_success() {
             if let Ok(val) = resp.json::<Value>() {
-                return Ok(TrackLyrics {
-                    synced_lyrics: val.get("syncedLyrics").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    plain_lyrics: val.get("plainLyrics").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    instrumental: val.get("instrumental").and_then(|v| v.as_bool()).unwrap_or(false),
-                });
+                if let Some(lyrics) = extract_lrclib_lyrics(&val) {
+                    return Ok(lyrics);
+                }
+                if val.get("instrumental").and_then(|v| v.as_bool()).unwrap_or(false)
+                    && is_lrclib_match(&val, true)
+                {
+                    return Ok(TrackLyrics {
+                        synced_lyrics: None,
+                        plain_lyrics: None,
+                        instrumental: true,
+                    });
+                }
             }
         }
     }
 
     let search_url = format!("{}/search", LRCLIB_API);
-    let query = format!("{} {}", primary_artist, title.trim());
-    if let Ok(resp) = client
-        .get(&search_url)
-        .timeout(Duration::from_secs(2))
-        .query(&[("q", query.as_str())])
-        .send()
-    {
-        if let Ok(Value::Array(arr)) = resp.json::<Value>() {
-            if let Some(best) = arr
-                .iter()
-                .find(|item| item.get("syncedLyrics").and_then(|v| v.as_str()).is_some())
-                .or_else(|| arr.first())
-            {
-                return Ok(TrackLyrics {
-                    synced_lyrics: best.get("syncedLyrics").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    plain_lyrics: best.get("plainLyrics").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    instrumental: best.get("instrumental").and_then(|v| v.as_bool()).unwrap_or(false),
-                });
+    let search_queries: Vec<Vec<(&str, String)>> = vec![
+        vec![
+            ("track_name", clean_title.to_string()),
+            ("artist_name", primary_artist.to_string()),
+        ],
+        vec![("q", format!("{} {}", primary_artist, clean_title))],
+    ];
+
+    for params in search_queries {
+        if let Ok(resp) = client
+            .get(&search_url)
+            .timeout(Duration::from_secs(2))
+            .query(&params)
+            .send()
+        {
+            if let Ok(Value::Array(arr)) = resp.json::<Value>() {
+                if let Some(best) = arr
+                    .iter()
+                    .find(|item| {
+                        is_lrclib_match(item, false)
+                            && item
+                                .get("syncedLyrics")
+                                .and_then(|v| v.as_str())
+                                .map(|s| !s.trim().is_empty())
+                                .unwrap_or(false)
+                    })
+                    .or_else(|| {
+                        arr.iter().find(|item| {
+                            is_lrclib_match(item, false)
+                                && item
+                                    .get("plainLyrics")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| !s.trim().is_empty())
+                                    .unwrap_or(false)
+                        })
+                    })
+                {
+                    if let Some(lyrics) = extract_lrclib_lyrics(best) {
+                        return Ok(lyrics);
+                    }
+                }
             }
         }
     }
