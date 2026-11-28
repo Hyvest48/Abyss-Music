@@ -1,4 +1,33 @@
-﻿node_modules
-dist
-src-tauri/target
+﻿# Зависимости и сборки
+node_modules/
+dist/
+dist-ssr/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Базы данных, кэш и логи
 *.db
+*.db-wal
+*.db-shm
+*.log
+npm-debug.log*
+.vite/
+.vite-temp/
+
+# Переменные окружения и секреты
+.env
+.env.*
+
+# Временные файлы ОС и редакторов
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+!.vscode/extensions.json
+.idea/
+
+# Установщики и промежуточные бинарники (кроме актуального .exe в корне)
+*.msi
+*.nsis.zip
+*.exe
+!/AbyssMusic.exe

@@ -594,18 +594,28 @@ async fn toggle_desktop_widget(
     let win = builder.build().map_err(|e| e.to_string())?;
     let app_handle = app.clone();
     let win_for_events = win.clone();
+    let move_seq = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     win.on_window_event(move |event| match event {
         tauri::WindowEvent::Moved(pos) => {
             let scale = win_for_events.scale_factor().unwrap_or(1.0);
             let lx = pos.x as f64 / scale;
             let ly = pos.y as f64 / scale;
             if lx > -5000.0 && ly > -5000.0 {
-                if let Some(st) = app_handle.try_state::<AppState>() {
-                    if let Ok(conn) = st.db.lock() {
-                        let _ = db::set_setting(&conn, "widget_pos_x", &lx.round().to_string());
-                        let _ = db::set_setting(&conn, "widget_pos_y", &ly.round().to_string());
+                let seq = move_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let seq_ref = std::sync::Arc::clone(&move_seq);
+                let ah = app_handle.clone();
+                // Дебаунсим запись координат в SQLite, чтобы не тормозить перетаскивание окна
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(350));
+                    if seq_ref.load(std::sync::atomic::Ordering::Relaxed) == seq {
+                        if let Some(st) = ah.try_state::<AppState>() {
+                            if let Ok(conn) = st.db.lock() {
+                                let _ = db::set_setting(&conn, "widget_pos_x", &lx.round().to_string());
+                                let _ = db::set_setting(&conn, "widget_pos_y", &ly.round().to_string());
+                            }
+                        }
                     }
-                }
+                });
             }
         }
         tauri::WindowEvent::Resized(size) => {
@@ -650,6 +660,23 @@ fn close_desktop_widget(app: tauri::AppHandle) -> Result<(), String> {
         win.close().map_err(|e| e.to_string())?;
     }
     let _ = app.emit("widget-visibility-changed", false);
+    Ok(())
+}
+
+#[tauri::command]
+fn get_desktop_widget_pos(app: tauri::AppHandle) -> Result<(i32, i32), String> {
+    let win = app
+        .get_webview_window("widget")
+        .ok_or_else(|| "Виджет не открыт".to_string())?;
+    let pos = win.outer_position().map_err(|e| e.to_string())?;
+    Ok((pos.x, pos.y))
+}
+
+#[tauri::command]
+fn move_desktop_widget(app: tauri::AppHandle, x: i32, y: i32) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("widget") {
+        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+    }
     Ok(())
 }
 
@@ -756,6 +783,22 @@ fn get_recent_tracks(limit: Option<usize>, state: State<AppState>) -> Result<Vec
 fn get_top_tracks(limit: Option<usize>, state: State<AppState>) -> Result<Vec<TrackItem>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     db::get_top_tracks(&conn, limit.unwrap_or(20))
+}
+
+#[tauri::command]
+fn add_artist_listening_time(
+    artist: String,
+    seconds: u64,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::add_artist_listening_time(&conn, &artist, seconds)
+}
+
+#[tauri::command]
+fn get_artist_listening_time(artist: String, state: State<AppState>) -> Result<u64, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::get_artist_listening_time(&conn, &artist)
 }
 
 // ─── Персистентная очередь ───────────────────────────────────────────────────
@@ -937,6 +980,8 @@ pub fn run() {
             is_desktop_widget_open,
             set_widget_pinned,
             close_desktop_widget,
+            get_desktop_widget_pos,
+            move_desktop_widget,
             request_widget_state,
             seek_track,
             set_volume,
@@ -952,6 +997,8 @@ pub fn run() {
             delete_playlist,
             get_recent_tracks,
             get_top_tracks,
+            add_artist_listening_time,
+            get_artist_listening_time,
             save_queue_state,
             load_queue_state
         ])

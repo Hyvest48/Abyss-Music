@@ -37,9 +37,64 @@ export const DesktopWidget: React.FC = () => {
   });
   const [isPinned, setIsPinned] = useState(true);
   const [isClosing, setIsClosing] = useState(false);
+  const [isAltPressed, setIsAltPressed] = useState(false);
   const [isDraggingSeek, setIsDraggingSeek] = useState(false);
   const [dragSeekSec, setDragSeekSec] = useState<number | null>(null);
   const trackBarRef = useRef<HTMLDivElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{
+    active: boolean;
+    pointerId: number;
+    startMouseX: number;
+    startMouseY: number;
+    startWinX: number;
+    startWinY: number;
+    targetX: number;
+    targetY: number;
+    curX: number;
+    curY: number;
+    lastSentX: number;
+    lastSentY: number;
+    inFlight: boolean;
+    rafId: number;
+  }>({
+    active: false,
+    pointerId: -1,
+    startMouseX: 0,
+    startMouseY: 0,
+    startWinX: 0,
+    startWinY: 0,
+    targetX: 0,
+    targetY: 0,
+    curX: 0,
+    curY: 0,
+    lastSentX: 0,
+    lastSentY: 0,
+    inFlight: false,
+    rafId: 0,
+  });
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Alt') setIsAltPressed(true);
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Alt') setIsAltPressed(false);
+    };
+    const onBlur = () => setIsAltPressed(false);
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+      if (dragRef.current.rafId) {
+        cancelAnimationFrame(dragRef.current.rafId);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     document.documentElement.classList.add('widget-mode');
@@ -129,13 +184,102 @@ export const DesktopWidget: React.FC = () => {
     void emit('media-seek', finalSec);
   };
 
-  const handleCardPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
+  const handleCardPointerDown = async (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || !e.altKey) return;
     const target = e.target as HTMLElement;
     if (target.closest('button, [role="slider"], .lg-resize-handle')) {
       return;
     }
-    void getCurrentWindow().startDragging();
+    e.preventDefault();
+    const cardEl = e.currentTarget;
+    cardEl.setPointerCapture(e.pointerId);
+
+    const dpr = window.devicePixelRatio || 1;
+    const startMouseX = e.screenX * dpr;
+    const startMouseY = e.screenY * dpr;
+
+    try {
+      const [winX, winY] = await invoke<[number, number]>('get_desktop_widget_pos');
+      const d = dragRef.current;
+      d.active = true;
+      d.pointerId = e.pointerId;
+      d.startMouseX = startMouseX;
+      d.startMouseY = startMouseY;
+      d.startWinX = winX;
+      d.startWinY = winY;
+      d.targetX = winX;
+      d.targetY = winY;
+      d.curX = winX;
+      d.curY = winY;
+      d.lastSentX = winX;
+      d.lastSentY = winY;
+
+      if (!d.rafId) {
+        let lastTime = performance.now();
+        const step = (now: number) => {
+          const dt = Math.min(0.05, Math.max(0.001, (now - lastTime) / 1000));
+          lastTime = now;
+
+          const lerp = 1 - Math.exp(-26 * dt);
+          const prevCurX = d.curX;
+          const prevCurY = d.curY;
+          d.curX += (d.targetX - d.curX) * lerp;
+          d.curY += (d.targetY - d.curY) * lerp;
+
+          const vx = d.curX - prevCurX;
+          const vy = d.curY - prevCurY;
+          const speed = Math.hypot(vx, vy);
+
+          if (cardRef.current) {
+            if (speed > 0.35) {
+              const blur = Math.min(1.4, speed * 0.04).toFixed(2);
+              cardRef.current.style.filter = `blur(${blur}px)`;
+            } else if (cardRef.current.style.filter) {
+              cardRef.current.style.filter = '';
+            }
+          }
+
+          const rx = Math.round(d.curX);
+          const ry = Math.round(d.curY);
+          if ((rx !== d.lastSentX || ry !== d.lastSentY) && !d.inFlight) {
+            d.inFlight = true;
+            d.lastSentX = rx;
+            d.lastSentY = ry;
+            void invoke('move_desktop_widget', { x: rx, y: ry }).finally(() => {
+              d.inFlight = false;
+            });
+          }
+
+          const dist = Math.hypot(d.targetX - d.curX, d.targetY - d.curY);
+          if (d.active || dist > 0.4) {
+            d.rafId = requestAnimationFrame(step);
+          } else {
+            if (cardRef.current) cardRef.current.style.filter = '';
+            d.rafId = 0;
+          }
+        };
+        d.rafId = requestAnimationFrame(step);
+      }
+    } catch {
+      void getCurrentWindow().startDragging();
+    }
+  };
+
+  const handleCardPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current;
+    if (!d.active) return;
+    const dpr = window.devicePixelRatio || 1;
+    d.targetX = d.startWinX + (e.screenX * dpr - d.startMouseX);
+    d.targetY = d.startWinY + (e.screenY * dpr - d.startMouseY);
+  };
+
+  const handleCardPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current;
+    if (!d.active) return;
+    d.active = false;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
   };
 
   const handleResizePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -156,8 +300,12 @@ export const DesktopWidget: React.FC = () => {
   return (
     <div className="lg-widget-stage">
       <div
+        ref={cardRef}
         className={`lg-widget-card ${isClosing ? 'is-closing' : ''}`}
         onPointerDown={handleCardPointerDown}
+        onPointerMove={handleCardPointerMove}
+        onPointerUp={handleCardPointerUp}
+        onPointerCancel={handleCardPointerUp}
       >
         <div
           className="lg-ambient-orb"
@@ -168,11 +316,8 @@ export const DesktopWidget: React.FC = () => {
           style={{ background: state.accentSecondary || '#4cc9f0' }}
         />
 
-        <div className="lg-top-row" data-tauri-drag-region>
-          <div
-            className={`lg-cover-wrap ${state.isPlaying ? 'is-playing' : ''}`}
-            data-tauri-drag-region
-          >
+        <div className="lg-top-row">
+          <div className={`lg-cover-wrap ${state.isPlaying ? 'is-playing' : ''}`}>
             {resolvedCover ? (
               <img
                 src={resolvedCover}
@@ -192,20 +337,13 @@ export const DesktopWidget: React.FC = () => {
                 <Music size={22} />
               </div>
             )}
-            {state.isPlaying && (
-              <div className="lg-eq-badge">
-                <span className="lg-eq-bar" />
-                <span className="lg-eq-bar" />
-                <span className="lg-eq-bar" />
-              </div>
-            )}
           </div>
 
-          <div className="lg-meta" data-tauri-drag-region>
-            <div className="lg-title" data-tauri-drag-region>
+          <div className="lg-meta">
+            <div className="lg-title">
               {track ? track.title : 'Abyss Music'}
             </div>
-            <div className="lg-artist" data-tauri-drag-region>
+            <div className="lg-artist">
               {track ? track.artist : 'Выберите трек в плеере'}
             </div>
           </div>
@@ -258,7 +396,7 @@ export const DesktopWidget: React.FC = () => {
           <span className="lg-time lg-time-right">{formatDuration(duration)}</span>
         </div>
 
-        <div className="lg-controls-row" data-tauri-drag-region>
+        <div className="lg-controls-row">
           <button
             type="button"
             className={`lg-glass-btn ${state.isFavorite ? 'is-liked' : ''}`}
@@ -305,16 +443,32 @@ export const DesktopWidget: React.FC = () => {
             </button>
           </div>
 
-          <span className="lg-brand-chip" data-tauri-drag-region>
-            Abyss
-          </span>
+          <div className="lg-right-group">
+            {track && (
+              <div
+                className={`lg-eq-badge ${state.isPlaying ? '' : 'is-paused'}`}
+                title={state.isPlaying ? 'Воспроизведение' : 'Пауза'}
+              >
+                <span className="lg-eq-bar" />
+                <span className="lg-eq-bar" />
+                <span className="lg-eq-bar" />
+              </div>
+            )}
+            <span className="lg-brand-chip">
+              Abyss
+            </span>
+          </div>
         </div>
 
-        <div
-          className="lg-resize-handle"
-          onPointerDown={handleResizePointerDown}
-          title="Изменить размер"
-        />
+        <div className="lg-alt-hint">Зажми ALT для переноса</div>
+
+        {isAltPressed && (
+          <div
+            className="lg-resize-handle"
+            onPointerDown={handleResizePointerDown}
+            title="Изменить размер"
+          />
+        )}
       </div>
     </div>
   );

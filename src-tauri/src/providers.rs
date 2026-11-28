@@ -1227,7 +1227,7 @@ pub fn fetch_lyrics(
 
     if let Some(id) = track_id {
         if let Some(ym_id) = id.strip_prefix("ym-") {
-            if let Some((synced, plain)) = fetch_yandex_lyrics(&client, yandex_token, ym_id) {
+            if let Some((synced, plain)) = fetch_yandex_lyrics(client, yandex_token, ym_id) {
                 return Ok(TrackLyrics {
                     synced_lyrics: synced,
                     plain_lyrics: plain,
@@ -1237,7 +1237,7 @@ pub fn fetch_lyrics(
         }
     }
 
-    if let Some(genius_lyrics) = fetch_genius_lyrics(&client, primary_artist, title.trim()) {
+    if let Some(genius_lyrics) = fetch_genius_lyrics(client, primary_artist, title.trim()) {
         return Ok(TrackLyrics {
             synced_lyrics: None,
             plain_lyrics: Some(genius_lyrics),

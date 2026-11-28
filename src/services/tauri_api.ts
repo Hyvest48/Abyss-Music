@@ -221,6 +221,12 @@ export const tauriApi = {
   getTopTracks: (limit = 20): Promise<TrackItem[]> =>
     invoke<TrackItem[]>('get_top_tracks', { limit }),
 
+  addArtistListeningTime: (artist: string, seconds: number): Promise<void> =>
+    invoke<void>('add_artist_listening_time', { artist, seconds }),
+
+  getArtistListeningTime: (artist: string): Promise<number> =>
+    invoke<number>('get_artist_listening_time', { artist }),
+
   saveQueueState: (payload: QueueStatePayload): Promise<void> =>
     invoke<void>('save_queue_state', { payload }),
 

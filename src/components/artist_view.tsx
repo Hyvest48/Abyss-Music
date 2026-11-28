@@ -16,6 +16,7 @@ import {
 import { TrackItem, getCoverGradient } from '../shared/models';
 import { TrackList, formatDuration } from './track_list';
 import { ArtistLinks } from './artist_links';
+import { tauriApi } from '../services/tauri_api';
 
 const artistProfileCache = new Map<string, ArtistProfile>();
 
@@ -87,6 +88,7 @@ export const ArtistView: React.FC<ArtistViewProps> = ({
   const [selectedAlbum, setSelectedAlbum] = useState<ArtistAlbum | null>(null);
   const [albumTracks, setAlbumTracks] = useState<TrackItem[]>([]);
   const [isLoadingAlbum, setIsLoadingAlbum] = useState(false);
+  const [listeningSeconds, setListeningSeconds] = useState<number>(0);
   const albumReqSeqRef = useRef(0);
 
   const [isArtistLiked, setIsArtistLiked] = useState<boolean>(() => {
@@ -108,6 +110,13 @@ export const ArtistView: React.FC<ArtistViewProps> = ({
     setFilterQuery('');
     setSelectedAlbum(null);
     setAlbumTracks([]);
+
+    tauriApi
+      .getArtistListeningTime(artistName)
+      .then((secs) => {
+        if (!cancelled) setListeningSeconds(secs);
+      })
+      .catch(() => {});
 
     try {
       const raw = localStorage.getItem('abyss-liked-artists');
@@ -438,6 +447,16 @@ export const ArtistView: React.FC<ArtistViewProps> = ({
               </span>
               {profile && profile.tracksCount > 0 && (
                 <span style={{ opacity: 0.6 }}>• {profile.tracksCount} треков</span>
+              )}
+              {listeningSeconds > 0 && (
+                <span style={{ opacity: 0.85, color: 'var(--accent-warm)', fontWeight: 600 }}>
+                  •{' '}
+                  {listeningSeconds >= 3600
+                    ? `${(listeningSeconds / 3600).toFixed(1)} ч прослушано`
+                    : listeningSeconds >= 60
+                    ? `${Math.floor(listeningSeconds / 60)} мин прослушано`
+                    : `${listeningSeconds} сек прослушано`}
+                </span>
               )}
             </div>
 

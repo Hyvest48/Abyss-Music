@@ -4,6 +4,7 @@ use std::time::Duration;
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig};
 use tauri::{AppHandle, Emitter};
 
+#[allow(clippy::enum_variant_names)]
 enum MediaCmd {
     SetMetadata {
         title: String,

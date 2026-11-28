@@ -23,12 +23,14 @@ pub fn start_global_hotkeys(app: AppHandle) {
         const ID_PREV: i32 = 3;
 
         #[repr(C)]
+        #[allow(clippy::upper_case_acronyms)]
         struct POINT {
             x: i32,
             y: i32,
         }
 
         #[repr(C)]
+        #[allow(clippy::upper_case_acronyms)]
         struct MSG {
             hwnd: isize,
             message: u32,

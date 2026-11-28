@@ -48,6 +48,10 @@ pub fn init_database(app: &AppHandle) -> Result<Connection, String> {
             current_track_id TEXT,
             position_sec INTEGER NOT NULL DEFAULT 0,
             queue_json TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE TABLE IF NOT EXISTS artist_stats (
+            artist_name TEXT PRIMARY KEY,
+            total_seconds INTEGER NOT NULL DEFAULT 0
         );"
     )
     .map_err(|e| e.to_string())?;
@@ -485,4 +489,39 @@ pub fn load_queue_state(conn: &Connection) -> Result<Option<QueueState>, String>
     } else {
         Ok(None)
     }
+}
+
+pub fn add_artist_listening_time(conn: &Connection, artist_raw: &str, seconds: u64) -> Result<(), String> {
+    if seconds == 0 {
+        return Ok(());
+    }
+    for part in artist_raw.split(',') {
+        let clean = part.trim().to_lowercase();
+        if clean.is_empty() || clean == "неизвестный исполнитель" {
+            continue;
+        }
+        conn.execute(
+            "INSERT INTO artist_stats (artist_name, total_seconds) VALUES (?1, ?2)
+             ON CONFLICT(artist_name) DO UPDATE SET total_seconds = total_seconds + excluded.total_seconds",
+            params![clean, seconds as i64],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+pub fn get_artist_listening_time(conn: &Connection, artist_name: &str) -> Result<u64, String> {
+    let clean = artist_name.split(',').next().unwrap_or(artist_name).trim().to_lowercase();
+    if clean.is_empty() {
+        return Ok(0);
+    }
+    let secs: Option<i64> = conn
+        .query_row(
+            "SELECT total_seconds FROM artist_stats WHERE artist_name = ?1",
+            params![clean],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(secs.unwrap_or(0).max(0) as u64)
 }

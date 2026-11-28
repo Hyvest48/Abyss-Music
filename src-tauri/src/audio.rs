@@ -300,7 +300,7 @@ pub fn clear_cache_dir(cache_dir: &Path) -> Result<(), String> {
 enum AudioCommand {
     LoadDecoded {
         generation: u64,
-        source: EqualizerSource<Decoder<Box<dyn ReadSeek>>>,
+        source: Box<EqualizerSource<Decoder<Box<dyn ReadSeek>>>>,
         reply: Sender<Result<(), String>>,
     },
     FadeStep(u64),
@@ -422,7 +422,7 @@ impl AudioPlayer {
                                         fade_in_started = None;
                                         new_sink.set_volume(target_vol);
                                     }
-                                    new_sink.append(source);
+                                    new_sink.append(*source);
                                     new_sink.play();
                                     sink = Some(new_sink);
                                     has_started = true;
@@ -730,7 +730,7 @@ impl AudioPlayer {
                     }
                     let _ = cmd_tx.send(AudioCommand::LoadDecoded {
                         generation,
-                        source: eq_source,
+                        source: Box::new(eq_source),
                         reply: reply_tx,
                     });
                 }

@@ -20,6 +20,7 @@ import {
   Disc3,
   History,
   Flame,
+  ArrowUp,
 } from 'lucide-react';
 import { getCoverGradient, resolveCoverSrc } from './shared/models';
 import { Sidebar, NavTab } from './components/sidebar';
@@ -213,6 +214,8 @@ export const App: React.FC = () => {
   const waveStartSeqRef = useRef(0);
   const playedWaveIdsRef = useRef<Set<string>>(new Set());
   const bloomRef = useRef<HTMLDivElement>(null);
+  const workspaceRef = useRef<HTMLElement>(null);
+  const [showScrollTop, setShowScrollTop] = useState(false);
   const searchCacheRef = useRef(new Map<string, YandexSearchResult>());
   const allTracksRef = useRef<TrackItem[]>([]);
 
@@ -1558,6 +1561,18 @@ export const App: React.FC = () => {
     };
   }, []);
 
+  const isPlaying = playbackStatus.isPlaying;
+  const currentArtist = currentTrack?.artist;
+
+  useEffect(() => {
+    if (!isPlaying || !currentArtist) return;
+    const timer = setInterval(() => {
+      if (isTransitioningRef.current) return;
+      void tauriApi.addArtistListeningTime(currentArtist, 5).catch(() => {});
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [isPlaying, currentArtist]);
+
   const handleToggleWidget = useCallback(async () => {
     try {
       const open = await tauriApi.toggleDesktopWidget();
@@ -1623,16 +1638,24 @@ export const App: React.FC = () => {
         onYandexLogout={handleYandexLogout}
       />
 
-      <main className="main-workspace">
-        <TopSearchBar
-          externalValue={searchQuery}
-          onSearchCommit={(val) => {
-            if (val.trim()) setSelectedEntity(null);
-            setSearchQuery(val);
+      <div className="main-workspace-wrap">
+        <main
+          ref={workspaceRef}
+          className="main-workspace"
+          onScroll={(e) => {
+            const top = e.currentTarget.scrollTop;
+            setShowScrollTop(top > 120);
           }}
-        />
+        >
+          <TopSearchBar
+            externalValue={searchQuery}
+            onSearchCommit={(val) => {
+              if (val.trim()) setSelectedEntity(null);
+              setSearchQuery(val);
+            }}
+          />
 
-        <div key={viewKey} className="view-transition">
+          <div key={viewKey} className="view-transition">
           {selectedEntity?.type === 'artist' ? (
             <ArtistView
               artistName={selectedEntity.name}
@@ -2314,8 +2337,19 @@ export const App: React.FC = () => {
               )}
             </div>
           ) : null}
-        </div>
-      </main>
+          </div>
+        </main>
+
+        <button
+          type="button"
+          className={`scroll-top-btn ${showScrollTop ? 'is-visible' : ''}`}
+          onClick={() => workspaceRef.current?.scrollTo({ top: 0, behavior: 'smooth' })}
+          title="Наверх"
+          aria-label="Вернуться наверх"
+        >
+          <ArrowUp size={18} />
+        </button>
+      </div>
 
       {isQueueOpen && (
         <aside className="queue-drawer">
